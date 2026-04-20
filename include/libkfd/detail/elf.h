@@ -477,11 +477,6 @@ uint32_t get_gfx_version(uint32_t mach);
 // Returns EF_AMDGPU_MACH_NONE (0) for unknown versions.
 uint32_t get_mach(uint32_t gfx_version);
 
-// Decompose a gfx_target_version into its components.
-constexpr uint32_t gfx_version_major(uint32_t v) { return (v / 10000) % 100; }
-constexpr uint32_t gfx_version_minor(uint32_t v) { return (v / 100) % 100; }
-constexpr uint32_t gfx_version_step(uint32_t v) { return v % 100; }
-
 // Format a gfx_target_version as "gfxNNNX" (e.g. "gfx1030", "gfx90a").
 // Returns the number of characters written (excluding null terminator).
 int format_gfx_version(char *buf, size_t size, uint32_t version);

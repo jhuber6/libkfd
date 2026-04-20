@@ -11,12 +11,12 @@
 #include "libkfd/detail/mapped_region.h"
 #include "libkfd/detail/utility.h"
 
-#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <fcntl.h>
 #include <string_view>
 #include <unistd.h>
+#include <utility>
 
 using namespace kfd::detail;
 
@@ -378,20 +378,20 @@ std::expected<NodeInfo, Error> read_node(uint32_t index) {
 uint32_t vgpr_size_per_cu(uint32_t gfxv) {
   if (gfxv == abi::GFX_VERSION_GFX942 || gfxv == abi::GFX_VERSION_GFX9_A ||
       gfxv == abi::GFX_VERSION_GFX9_8 || gfxv == abi::GFX_VERSION_GFX950)
-    return 0x80000;
+    return /*512 KiB=*/0x80000;
   if (gfxv == abi::GFX_VERSION_GFX11 || gfxv == abi::GFX_VERSION_GFX1101 ||
       gfxv == abi::GFX_VERSION_GFX1151 || gfxv == abi::GFX_VERSION_GFX12 ||
       gfxv == abi::GFX_VERSION_GFX1201)
-    return 0x60000;
-  return 0x40000;
+    return /*384 KiB=*/0x60000;
+  return /*256 KiB=*/0x40000;
 }
 
 // Mirrors the kernel's kfd_queue_ctx_save_restore_size().
 std::pair<uint32_t, uint32_t> compute_cwsr_sizes(const NodeProperties &props) {
   uint32_t gfxv = props.gfx_target_version;
-  constexpr uint32_t SGPR_SIZE_PER_CU = 0x4000;
-  constexpr uint32_t LDS_SIZE_PER_CU = 0x10000;
-  constexpr uint32_t HWREG_SIZE_PER_CU = 0x1000;
+  constexpr uint32_t SGPR_SIZE_PER_CU = /*16 KiB=*/0x4000;
+  constexpr uint32_t LDS_SIZE_PER_CU = /*64 KiB=*/0x10000;
+  constexpr uint32_t HWREG_SIZE_PER_CU = /*4 KiB=*/0x1000;
   constexpr uint32_t CWSR_HEADER_SIZE = sizeof(abi::CwsrHeader);
 
   uint32_t num_xcc = props.num_xcc ? props.num_xcc : 1;
@@ -402,7 +402,7 @@ std::pair<uint32_t, uint32_t> compute_cwsr_sizes(const NodeProperties &props) {
     uint32_t simd_arrays_per_engine =
         props.simd_arrays_per_engine ? props.simd_arrays_per_engine : 1;
     uint32_t max_waves = props.array_count / simd_arrays_per_engine * 512;
-    wave_num = std::min(cu_num * 40, max_waves);
+    wave_num = detail::min(cu_num * 40, max_waves);
   } else {
     wave_num = cu_num * 32;
   }
@@ -420,9 +420,8 @@ std::pair<uint32_t, uint32_t> compute_cwsr_sizes(const NodeProperties &props) {
   ctl_stack_size = align_up(CWSR_HEADER_SIZE + ctl_stack_size,
                             static_cast<uint32_t>(page_size()));
 
-  uint32_t gfx_major_family = (gfxv / 10000) * 10000;
-  if (gfx_major_family == 100000)
-    ctl_stack_size = std::min(ctl_stack_size, 0x7000u);
+  if (abi::gfx_version_major(gfxv) == /*GFX10=*/100)
+    ctl_stack_size = detail::min(ctl_stack_size, /*28 KiB=*/0x7000u);
 
   return {ctl_stack_size + wg_data_size, ctl_stack_size};
 }

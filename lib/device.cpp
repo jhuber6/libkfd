@@ -167,9 +167,9 @@ std::expected<TrapHandlerBuffers, Error> setup_trap_handler(Device &dev) {
   const trap_handler_image *img = find_trap_image(dev.gfx_version());
   if (!img)
     return kfd::unexpected(ENOENT, "no trap handler image for device gfx%u%u%x",
-                           elf::gfx_version_major(dev.gfx_version()),
-                           elf::gfx_version_minor(dev.gfx_version()),
-                           elf::gfx_version_step(dev.gfx_version()));
+                           abi::gfx_version_major(dev.gfx_version()),
+                           abi::gfx_version_minor(dev.gfx_version()),
+                           abi::gfx_version_step(dev.gfx_version()));
 
   auto obj = KFD_TRY(elf::ELF64LE::create(
       {reinterpret_cast<const std::byte *>(img->data), img->size}));

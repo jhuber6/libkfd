@@ -30,6 +30,11 @@ inline constexpr uint32_t GFX_VERSION_GFX1151 = 110501;
 inline constexpr uint32_t GFX_VERSION_GFX12 = 120000;
 inline constexpr uint32_t GFX_VERSION_GFX1201 = 120001;
 
+// Decompose a gfx_target_version into its components.
+constexpr uint32_t gfx_version_major(uint32_t v) { return (v / 10000) % 100; }
+constexpr uint32_t gfx_version_minor(uint32_t v) { return (v / 100) % 100; }
+constexpr uint32_t gfx_version_step(uint32_t v) { return v % 100; }
+
 // Required alignment for the private scratch region.
 constexpr size_t PRIVATE_SEGMENT_ALIGN = 0x10000;
 

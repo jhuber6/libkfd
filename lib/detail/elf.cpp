@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "libkfd/detail/elf.h"
+#include "libkfd/abi.h"
 
 #include <cstdio>
 
@@ -96,8 +97,9 @@ uint32_t get_mach(uint32_t gfx_version) {
 }
 
 int format_gfx_version(char *buf, size_t size, uint32_t version) {
-  return std::snprintf(buf, size, "gfx%u%u%x", gfx_version_major(version),
-                       gfx_version_minor(version), gfx_version_step(version));
+  return std::snprintf(buf, size, "gfx%u%u%x", abi::gfx_version_major(version),
+                       abi::gfx_version_minor(version),
+                       abi::gfx_version_step(version));
 }
 
 bool is_generic_mach(uint32_t mach) {

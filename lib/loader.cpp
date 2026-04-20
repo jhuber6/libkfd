@@ -12,7 +12,6 @@
 #include "libkfd/queue.h"
 #include "libkfd/signal.h"
 
-#include <algorithm>
 #include <cstring>
 #include <utility>
 
@@ -30,7 +29,7 @@ Kernel::make_kernargs(Device &dev, std::span<const std::byte> explicit_args,
   KFD_CHECK(buf.map(dev));
 
   std::memset(buf.data(), 0, total);
-  size_t copy_size = std::min(explicit_args.size(), total);
+  size_t copy_size = detail::min(explicit_args.size(), total);
   std::memcpy(buf.data(), explicit_args.data(), copy_size);
   abi::fill_implicit_args(buf.data(), explicit_args.size(), *descriptor, cfg);
 
@@ -60,14 +59,14 @@ Executable::load(Device &dev, std::span<const std::byte> image, SDMAQueue &sdma,
                           sramecc))
     return unexpected(
         ENOEXEC, "ELF e_machine '%s' incompatible with device gfx%u%u%x",
-        elf::get_name(mach).data(), elf::gfx_version_major(dev.gfx_version()),
-        elf::gfx_version_minor(dev.gfx_version()),
-        elf::gfx_version_step(dev.gfx_version()));
+        elf::get_name(mach).data(), abi::gfx_version_major(dev.gfx_version()),
+        abi::gfx_version_minor(dev.gfx_version()),
+        abi::gfx_version_step(dev.gfx_version()));
 
   auto extent = KFD_TRY(elf.load_extent());
   auto &[lo, hi, max_align] = extent;
 
-  max_align = std::max(max_align, static_cast<uint64_t>(page_size()));
+  max_align = detail::max(max_align, static_cast<uint64_t>(page_size()));
   uint64_t footprint = align_up(hi - lo, max_align);
   if (footprint > UINT32_MAX)
     return unexpected(EFBIG, "image footprint %lu exceeds 4 GiB",

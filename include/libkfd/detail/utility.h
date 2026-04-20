@@ -50,6 +50,9 @@ constexpr uint32_t hi(uint64_t v) { return static_cast<uint32_t>(v >> 32); }
 inline uint32_t lo(const void *p) { return lo(reinterpret_cast<uintptr_t>(p)); }
 inline uint32_t hi(const void *p) { return hi(reinterpret_cast<uintptr_t>(p)); }
 
+template <typename T> constexpr T min(T a, T b) { return a < b ? a : b; }
+template <typename T> constexpr T max(T a, T b) { return a > b ? a : b; }
+
 template <typename T> constexpr T align_up(T value, T alignment) {
 #if __has_builtin(__builtin_align_up)
   return __builtin_align_up(value, alignment);
