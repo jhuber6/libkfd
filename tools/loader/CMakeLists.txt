@@ -1,0 +1,11 @@
+get_filename_component(_clang_bin_dir ${CMAKE_CXX_COMPILER} DIRECTORY)
+set(rpc_include "${_clang_bin_dir}/../include")
+if(NOT EXISTS "${rpc_include}/shared/rpc.h")
+  message(WARNING "gpu-loader: shared/rpc.h not found, skipping build")
+  return()
+endif()
+
+add_executable(gpu-loader main.cpp)
+target_link_libraries(gpu-loader PRIVATE libkfd::kfd)
+target_include_directories(gpu-loader PRIVATE ${rpc_include})
+install(TARGETS gpu-loader DESTINATION ${CMAKE_INSTALL_BINDIR})

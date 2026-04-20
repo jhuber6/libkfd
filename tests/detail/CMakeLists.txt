@@ -1,0 +1,15 @@
+add_subdirectory(input)
+
+kfd_add_test(small_vector_test small_vector_test.cpp)
+kfd_add_test(mapped_region_test mapped_region_test.cpp)
+kfd_add_test(pool_allocator_test pool_allocator_test.cpp)
+kfd_add_test(utility_test utility_test.cpp)
+kfd_add_test(error_test error_test.cpp)
+kfd_add_test(mutex_test mutex_test.cpp)
+
+kfd_add_test(elf_test elf_test.cpp)
+target_include_directories(elf_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/input")
+get_property(kernel_targets GLOBAL PROPERTY LIBKFD_GPU_KERNEL_TARGETS)
+foreach(target IN LISTS kernel_targets)
+  add_dependencies(elf_test ${target})
+endforeach()

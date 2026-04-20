@@ -1,0 +1,3 @@
+add_subdirectory(sandbox)
+add_subdirectory(loader)
+add_subdirectory(kfdinfo)

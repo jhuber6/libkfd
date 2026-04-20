@@ -1,0 +1,26 @@
+# Build directories
+build/
+out/
+
+# Compilation artifacts
+*.o
+*.d
+*.a
+*.so
+*.dylib
+
+# CMake user-local presets
+CMakeUserPresets.json
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+.cache/
+compile_commands.json
+
+# OS artifacts
+.DS_Store
+Thumbs.db

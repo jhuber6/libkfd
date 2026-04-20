@@ -1,0 +1,5 @@
+kfd_add_device_test(context_test context_test.cpp)
+kfd_add_device_test(event_test event_test.cpp)
+kfd_add_device_test(memory_test memory_test.cpp)
+kfd_add_device_test(queue_test queue_test.cpp)
+kfd_add_device_test(sdma_test sdma_test.cpp)

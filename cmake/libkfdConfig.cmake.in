@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(PkgConfig)
+pkg_check_modules(LIBDRM_AMDGPU REQUIRED libdrm_amdgpu)
+
+include("${CMAKE_CURRENT_LIST_DIR}/libkfdTargets.cmake")
+
+check_required_components(libkfd)
