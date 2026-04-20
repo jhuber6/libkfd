@@ -8,7 +8,7 @@
 #ifndef LIBKFD_DETAIL_SCRATCH_H
 #define LIBKFD_DETAIL_SCRATCH_H
 
-#include "libkfd/dispatch.h"
+#include "libkfd/abi.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -27,7 +27,22 @@ inline constexpr uint32_t SCRATCH_LANES_PER_WAVE = 64;
 // References: LLVM SIDefines.h S_00B860_WAVESIZE_*;
 //             ROCr amd_aql_queue.cpp mem_alignment_size
 inline uint32_t scratch_alignment_unit(uint32_t gfx_version) {
-  return gfx_version / 10000 >= 11 ? 256 : 1024;
+  return gfx_version >= abi::GFX_VERSION_GFX11 ? 256 : 1024;
+}
+
+// Maximum per-wave scratch bytes before COMPUTE_TMPRING_SIZE.WAVESIZE
+// overflows.
+//   GFX9-10:  13-bit WAVESIZE × 1024B alignment = 8,387,584 bytes
+//   GFX11:    15-bit WAVESIZE ×  256B alignment = 8,388,352 bytes
+//   GFX12:    18-bit WAVESIZE ×  256B alignment = 67,108,608 bytes
+// References: ROCr amd_gpu_agent.cpp MAX_WAVE_SCRATCH / MAX_WAVE_SCRATCH_GFX12;
+//             gc_11_0_0_sh_mask.h COMPUTE_TMPRING_SIZE__WAVESIZE_MASK
+inline uint32_t max_wave_scratch(uint32_t gfx_version) {
+  if (gfx_version >= abi::GFX_VERSION_GFX12)
+    return (((1u << 18) - 1) * 256); // 67,108,608
+  if (gfx_version >= abi::GFX_VERSION_GFX11)
+    return (((1u << 15) - 1) * 256); // 8,388,352
+  return (((1u << 13) - 1) * 1024);  // 8,387,584
 }
 
 uint32_t scratch_num_se(const Device &dev);
@@ -59,9 +74,6 @@ uint32_t compute_tmpring_size(const Device &dev, uint32_t per_thread,
 
 // Maximum device scratch slot count (CUs * MaxSlotsScratchCU, SE-aligned).
 uint32_t scratch_device_slots(const Device &dev);
-
-// Scratch wave slots needed to cover a particular dispatch grid.
-uint32_t scratch_dispatch_slots(const Device &dev, Dim3 grid, Dim3 block);
 
 // Backing allocation size for the given per-thread need and wave slot count.
 size_t scratch_alloc_size(const Device &dev, uint32_t per_thread,

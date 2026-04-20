@@ -490,6 +490,14 @@ std::expected<void, Error> ComputeQueue::ensure_scratch(uint32_t needed,
   if (needed <= scratch_per_thread)
     return {};
 
+  size_t per_wave = detail::align_up(
+      size_t(detail::SCRATCH_LANES_PER_WAVE) * needed,
+      size_t(detail::scratch_alignment_unit(base.dev->gfx_version())));
+  if (per_wave > detail::max_wave_scratch(base.dev->gfx_version()))
+    return kfd::unexpected(
+        ERANGE, "scratch %u B exceeds hardware per-wave limit (%u B / wave)",
+        needed, detail::max_wave_scratch(base.dev->gfx_version()));
+
   // Drain all in-flight work so the current scratch region has no remaining
   // references. Using PM4 does not allow the independent sizing that AQL uses.
   // TODO: Stop this from blocking the user thread using an indirect buffer to
@@ -519,9 +527,9 @@ std::expected<void, Error> ComputeQueue::ensure_scratch(uint32_t needed,
     return !r && r.error().code == ENOMEM;
   };
 
-  // Size scratch to the dispatch grid's actual occupancy. If even that does
-  // not fit, progressively reduce the wave count until something works.
-  uint32_t slots = detail::scratch_dispatch_slots(*base.dev, grid, block);
+  // Size scratch to the full device capacity, If scratch memory is exhausted ,
+  // progressively reduce the wave count until something fits.
+  uint32_t slots = detail::scratch_device_slots(*base.dev);
   uint32_t num_se = detail::scratch_num_se(*base.dev);
   uint32_t waves_per_group =
       static_cast<uint32_t>((uint64_t(block.x) * block.y * block.z +
@@ -530,7 +538,8 @@ std::expected<void, Error> ComputeQueue::ensure_scratch(uint32_t needed,
   if (waves_per_group == 0)
     waves_per_group = 1;
 
-  while (slots >= num_se) {
+  uint32_t min_slots = 2 * num_se;
+  while (slots >= min_slots) {
     if (auto r = try_scratch_alloc(needed, slots); !retry(r))
       return r;
     slots -= waves_per_group;

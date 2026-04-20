@@ -30,6 +30,9 @@ uint32_t compute_tmpring_size(const Device &dev, uint32_t per_thread,
   uint32_t align = scratch_alignment_unit(dev.gfx_version());
   per_wave = align_up(per_wave, static_cast<size_t>(align));
 
+  if (per_wave > max_wave_scratch(dev.gfx_version()))
+    return 0;
+
   uint32_t simd_per_cu = props.simd_per_cu ? props.simd_per_cu : 1;
   uint32_t num_cus = props.simd_count / simd_per_cu;
   uint32_t num_se = scratch_num_se(dev);
@@ -76,53 +79,9 @@ uint32_t scratch_device_slots(const Device &dev) {
   uint32_t simd_per_cu = p.simd_per_cu ? p.simd_per_cu : 1;
   uint32_t num_cus = p.simd_count / simd_per_cu;
   uint32_t num_se = scratch_num_se(dev);
-  uint32_t slots = num_cus * p.max_slots_scratch_cu;
-  slots = (slots / num_se) * num_se;
-  return slots ? slots : num_se;
-}
-
-uint32_t scratch_dispatch_slots(const Device &dev, Dim3 grid, Dim3 block) {
-  uint64_t threads_per_group =
-      uint64_t(block.x) * uint64_t(block.y) * uint64_t(block.z);
-  uint32_t waves_per_group =
-      static_cast<uint32_t>((threads_per_group + SCRATCH_LANES_PER_WAVE - 1) /
-                            SCRATCH_LANES_PER_WAVE);
-
-  uint64_t groups = ((static_cast<uint64_t>(grid.x) + block.x - 1) / block.x) *
-                    ((static_cast<uint64_t>(grid.y) + block.y - 1) / block.y) *
-                    ((static_cast<uint64_t>(grid.z) + block.z - 1) / block.z);
-
-  // Estimate the maximum number of groups the hardware can run concurrently.
-  const auto &p = dev.properties();
-  uint32_t simd_per_cu = p.simd_per_cu ? p.simd_per_cu : 1;
-  uint32_t num_cus = p.simd_count / simd_per_cu;
-  uint32_t num_se = scratch_num_se(dev);
-  uint32_t max_groups_per_se = num_cus / num_se;
-
-  // GFX10+ uses a multiple of 256 for more efficient SE scheduling.
-  if (dev.gfx_version() >= abi::GFX_VERSION_GFX10_1) {
-    uint32_t min_occupancy =
-        threads_per_group > 0
-            ? align_up(static_cast<uint32_t>(threads_per_group), 256u)
-            : 1;
-    if (min_occupancy > 16)
-      min_occupancy = 16;
-    if (max_groups_per_se < min_occupancy)
-      max_groups_per_se = min_occupancy;
-  }
-
-  uint64_t concurrent_groups = uint64_t(max_groups_per_se) * num_se;
-  if (groups < concurrent_groups)
-    concurrent_groups = groups;
-
-  uint64_t dispatch_slots = concurrent_groups * waves_per_group;
-  uint32_t device_max = scratch_device_slots(dev);
-  if (dispatch_slots > device_max)
-    dispatch_slots = device_max;
-
-  // Align to SE count for the TMPRING_SIZE register.
-  auto slots = static_cast<uint32_t>(dispatch_slots);
-  slots = (slots / num_se) * num_se;
+  // The Shader Processor Input (SPI) assigns slots per-SE, so we round up to
+  // the number of SEs to produce the max slots needed for the device.
+  uint32_t slots = align_up(num_cus, num_se) * p.max_slots_scratch_cu;
   return slots ? slots : num_se;
 }
 
