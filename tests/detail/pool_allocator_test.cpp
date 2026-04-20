@@ -193,12 +193,11 @@ TEST_CASE("PoolAllocator - deallocate null is safe", "[pool_allocator]") {
   REQUIRE_RESULT(a->deallocate(nullptr, 64));
 }
 
-TEST_CASE("PoolAllocator - deallocate out-of-range is safe",
-          "[pool_allocator]") {
+TEST_CASE("PoolAllocator - deallocate out-of-range fails", "[pool_allocator]") {
   auto a = PoolAllocator::create(region(4096), 64);
   REQUIRE_RESULT(a);
-  REQUIRE_RESULT(a->deallocate(reinterpret_cast<void *>(uintptr_t{0}), 64));
-  REQUIRE_RESULT(a->deallocate(BASE + 8192, 64));
+  CHECK_FALSE(a->deallocate(BASE + 8192, 64).has_value());
+  CHECK_FALSE(a->deallocate(BASE - 64, 64).has_value());
 }
 
 TEST_CASE("PoolAllocator - move construction", "[pool_allocator]") {

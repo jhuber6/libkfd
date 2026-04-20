@@ -8,6 +8,8 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <sys/mman.h>
 #include <utility>
 
@@ -78,14 +80,20 @@ std::expected<MappedRegion, Error> MappedRegion::rebind(int fd, int prot,
 }
 
 MappedRegion::~MappedRegion() {
-  if (addr)
-    ::munmap(addr, len);
+  if (addr && ::munmap(addr, len) != 0) {
+    std::fprintf(stderr, "assertion failed: munmap(%p, %zu): %s\n", addr, len,
+                 std::strerror(errno));
+    std::abort();
+  }
 }
 
 MappedRegion &MappedRegion::operator=(MappedRegion &&other) {
   if (this != &other) {
-    if (addr)
-      ::munmap(addr, len);
+    if (addr && ::munmap(addr, len) != 0) {
+      std::fprintf(stderr, "assertion failed: munmap(%p, %zu): %s\n", addr, len,
+                   std::strerror(errno));
+      std::abort();
+    }
     addr = std::exchange(other.addr, nullptr);
     len = std::exchange(other.len, 0);
   }

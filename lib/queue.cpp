@@ -77,6 +77,8 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
   if (!std::has_single_bit(ring_size))
     return kfd::unexpected(EINVAL, "ring size %zu is not a power of two",
                            ring_size);
+  if (ring_size > UINT32_MAX)
+    return kfd::unexpected(EINVAL, "ring size %zu exceeds uint32_t", ring_size);
 
   const bool is_compute = type == QueueType::COMPUTE;
 
@@ -226,11 +228,11 @@ QueueBase::~QueueBase() {
   if (err_event)
     ctx->unregister_queue_error(err_event.event_id());
   ioctl::kfd::destroy_queue_args args{.queue_id = id};
-  ioctl::call<ioctl::kfd::DESTROY_QUEUE>(ctx->kfd_fd(), args);
+  KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_QUEUE>(ctx->kfd_fd(), args));
   if (scratch_va) {
     scratch_bo.release_device();
     scratch_bo = {};
-    (void)dev->scratch_allocator.deallocate(scratch_va, scratch_size);
+    KFD_ASSERT(dev->scratch_allocator.deallocate(scratch_va, scratch_size));
   }
 }
 
@@ -254,11 +256,11 @@ QueueBase &QueueBase::operator=(QueueBase &&other) {
     if (err_event)
       ctx->unregister_queue_error(err_event.event_id());
     ioctl::kfd::destroy_queue_args dq{.queue_id = id};
-    ioctl::call<ioctl::kfd::DESTROY_QUEUE>(ctx->kfd_fd(), dq);
+    KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_QUEUE>(ctx->kfd_fd(), dq));
     if (scratch_va) {
       scratch_bo.release_device();
       scratch_bo = {};
-      (void)dev->scratch_allocator.deallocate(scratch_va, scratch_size);
+      KFD_ASSERT(dev->scratch_allocator.deallocate(scratch_va, scratch_size));
     }
   }
 
@@ -415,11 +417,11 @@ std::expected<void, Error> ComputeQueue::try_scratch_alloc(uint32_t per_thread,
   auto bo = Buffer::allocate(*base.dev, alloc_size, MemType::VRAM,
                              MemFlags::WRITABLE, region);
   if (!bo) {
-    (void)release_scratch_region(region, alloc_size);
+    KFD_ASSERT(release_scratch_region(region, alloc_size));
     return kfd::unexpected(bo.error());
   }
   if (auto r = bo->map(*base.dev); !r) {
-    (void)release_scratch_region(region, alloc_size, &*bo);
+    KFD_ASSERT(release_scratch_region(region, alloc_size, &*bo));
     return kfd::unexpected(r.error());
   }
 

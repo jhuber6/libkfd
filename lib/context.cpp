@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <linux/futex.h>
@@ -120,28 +121,24 @@ int fault_watcher_entry(void *arg) {
 
     ioctl::kfd::event_data mem_ed{};
     mem_ed.event_id = w->mem_event.event_id();
-    if (!eds.push_back(mem_ed))
-      continue;
+    KFD_ASSERT(eds.push_back(mem_ed));
 
     ioctl::kfd::event_data hw_ed{};
     hw_ed.event_id = w->hw_event.event_id();
-    if (!eds.push_back(hw_ed))
-      continue;
+    KFD_ASSERT(eds.push_back(hw_ed));
 
     {
       LockGuard guard(w->queue_mtx);
       for (auto &qe : w->queue_errors) {
         ioctl::kfd::event_data qed{};
         qed.event_id = qe.event_id;
-        if (!eds.push_back(qed))
-          break;
+        KFD_ASSERT(eds.push_back(qed));
       }
     }
 
     ioctl::kfd::event_data wake_ed{};
     wake_ed.event_id = w->wake_event.event_id();
-    if (!eds.push_back(wake_ed))
-      continue;
+    KFD_ASSERT(eds.push_back(wake_ed));
 
     // Multi-event wait-any with event_data inspection is not covered by
     // Event::wait(), so the raw ioctl is used here.
@@ -252,7 +249,7 @@ void stop_fault_watcher(void *ptr) {
     return;
 
   __atomic_store_n(&watcher->exit_flag, 1, __ATOMIC_RELEASE);
-  (void)watcher->wake_event.signal();
+  KFD_ASSERT(watcher->wake_event.signal());
 
   while (__atomic_load_n(&watcher->tid, __ATOMIC_ACQUIRE) != 0)
     ::syscall(SYS_futex, &watcher->tid, FUTEX_WAIT, watcher->tid, nullptr,
@@ -261,7 +258,11 @@ void stop_fault_watcher(void *ptr) {
   void *stack = watcher->stack;
   watcher->~FaultWatcher();
   std::free(watcher);
-  ::munmap(stack, WATCHER_STACK_SIZE);
+  if (::munmap(stack, WATCHER_STACK_SIZE) != 0) {
+    std::fprintf(stderr, "assertion failed: munmap(%p, %zu): %s\n", stack,
+                 static_cast<size_t>(WATCHER_STACK_SIZE), std::strerror(errno));
+    std::abort();
+  }
 }
 
 void add_queue_error(void *ptr, uint32_t event_id, volatile uint64_t *payload,
@@ -270,8 +271,9 @@ void add_queue_error(void *ptr, uint32_t event_id, volatile uint64_t *payload,
   if (!watcher)
     return;
   LockGuard guard(watcher->queue_mtx);
-  (void)watcher->queue_errors.push_back({event_id, payload, queue_id, gpu_id});
-  (void)watcher->wake_event.signal();
+  KFD_ASSERT(
+      watcher->queue_errors.push_back({event_id, payload, queue_id, gpu_id}));
+  KFD_ASSERT(watcher->wake_event.signal());
 }
 
 void remove_queue_error(void *ptr, uint32_t event_id) {
@@ -287,7 +289,7 @@ void remove_queue_error(void *ptr, uint32_t event_id) {
       break;
     }
   }
-  (void)watcher->wake_event.signal();
+  KFD_ASSERT(watcher->wake_event.signal());
 }
 
 void free_signal_page(int kfd_fd, SmallVector<Device, 4> &devs,
@@ -296,16 +298,20 @@ void free_signal_page(int kfd_fd, SmallVector<Device, 4> &devs,
     return;
   SmallVector<uint32_t, 4> ids;
   for (auto &d : devs)
-    (void)ids.push_back(d.gpu_id());
+    KFD_ASSERT(ids.push_back(d.gpu_id()));
   ioctl::kfd::unmap_memory_from_gpu_args uargs{
       .handle = page.handle,
       .device_ids_array_ptr = reinterpret_cast<uintptr_t>(ids.data()),
       .n_devices = static_cast<uint32_t>(ids.size()),
   };
-  ioctl::call<ioctl::kfd::UNMAP_MEMORY_FROM_GPU>(kfd_fd, uargs);
+  KFD_ASSERT(ioctl::call<ioctl::kfd::UNMAP_MEMORY_FROM_GPU>(kfd_fd, uargs));
   ioctl::kfd::free_memory_of_gpu_args fargs{.handle = page.handle};
-  ioctl::call<ioctl::kfd::FREE_MEMORY_OF_GPU>(kfd_fd, fargs);
-  ::munmap(page.addr, page.alloc_size);
+  KFD_ASSERT(ioctl::call<ioctl::kfd::FREE_MEMORY_OF_GPU>(kfd_fd, fargs));
+  if (::munmap(page.addr, page.alloc_size) != 0) {
+    std::fprintf(stderr, "assertion failed: munmap(%p, %zu): %s\n", page.addr,
+                 page.alloc_size, std::strerror(errno));
+    std::abort();
+  }
   page.addr = nullptr;
   page.handle = 0;
 }
@@ -437,10 +443,20 @@ std::expected<VersionInfo, Error> Context::version() const {
 }
 
 uint64_t *Context::event_slot(uint32_t id) {
+  if (id >= KFD_SIGNAL_EVENT_LIMIT) {
+    std::fprintf(stderr, "assertion failed: event id %u >= limit %u\n", id,
+                 static_cast<unsigned>(KFD_SIGNAL_EVENT_LIMIT));
+    std::abort();
+  }
   return &__atomic_load_n(&event_page, __ATOMIC_ACQUIRE)[id];
 }
 
 uint64_t *Context::fence_slot(uint32_t id) {
+  if (id >= KFD_SIGNAL_EVENT_LIMIT) {
+    std::fprintf(stderr, "assertion failed: fence id %u >= limit %u\n", id,
+                 static_cast<unsigned>(KFD_SIGNAL_EVENT_LIMIT));
+    std::abort();
+  }
   return &__atomic_load_n(&fence_page, __ATOMIC_ACQUIRE)[id];
 }
 

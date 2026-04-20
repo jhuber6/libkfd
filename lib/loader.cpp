@@ -111,31 +111,42 @@ Executable::load(Device &dev, std::span<const std::byte> image, SDMAQueue &sdma,
   for (const auto &phdr : elf.phdrs()) {
     if (phdr.p_type != elf::PT_DYNAMIC)
       continue;
-    auto dyn_data = elf.segment_data(phdr);
-    if (!dyn_data)
-      break;
+    auto dyn_data = KFD_TRY(elf.segment_data(phdr));
     auto dyns =
-        std::span(reinterpret_cast<const elf::Elf64_Dyn *>(dyn_data->data()),
-                  dyn_data->size() / sizeof(elf::Elf64_Dyn));
+        std::span(reinterpret_cast<const elf::Elf64_Dyn *>(dyn_data.data()),
+                  dyn_data.size() / sizeof(elf::Elf64_Dyn));
 
-    const elf::Elf64_Rela *rela_table = nullptr;
+    uint64_t rela_ptr = 0;
     uint64_t rela_size = 0;
     for (const auto &dyn : dyns) {
       if (dyn.d_tag == elf::DT_NULL)
         break;
       if (dyn.d_tag == elf::DT_RELA)
-        rela_table = reinterpret_cast<const elf::Elf64_Rela *>(
-            static_cast<const char *>(staging.data()) + dyn.d_un.d_ptr - lo);
+        rela_ptr = dyn.d_un.d_ptr;
       else if (dyn.d_tag == elf::DT_RELASZ)
         rela_size = dyn.d_un.d_val;
     }
 
-    if (rela_table && rela_size) {
+    if (rela_ptr && rela_size) {
+      if (rela_ptr < lo || rela_ptr - lo > footprint ||
+          rela_size > footprint - (rela_ptr - lo))
+        return unexpected(ERANGE,
+                          "DT_RELA 0x%lx + 0x%lx overflows staging "
+                          "buffer of %lu bytes (base 0x%lx)",
+                          static_cast<unsigned long>(rela_ptr),
+                          static_cast<unsigned long>(rela_size),
+                          static_cast<unsigned long>(footprint),
+                          static_cast<unsigned long>(lo));
+
+      const auto *rela_table = reinterpret_cast<const elf::Elf64_Rela *>(
+          static_cast<const char *>(staging.data()) + rela_ptr - lo);
       size_t count = rela_size / sizeof(elf::Elf64_Rela);
       for (size_t i = 0; i < count; ++i) {
         const auto &rel = rela_table[i];
         if (rel.getType() == elf::R_AMDGPU_RELATIVE64) {
           uint64_t value = load_bias + static_cast<uint64_t>(rel.r_addend);
+          if (rel.r_offset < lo)
+            continue;
           uint64_t off = rel.r_offset - lo;
           if (off + sizeof(uint64_t) <= footprint)
             std::memcpy(static_cast<char *>(staging.data()) + off, &value,
@@ -170,8 +181,21 @@ Executable::symbol(std::string_view name) const {
     return unexpected(ENOENT, "symbol '%.*s' not found",
                       static_cast<int>(name.size()), name.data());
 
-  auto *ptr =
-      static_cast<std::byte *>(image.data()) + sym->st_value - base_vaddr;
+  if (sym->st_value < base_vaddr)
+    return unexpected(ERANGE, "symbol '%.*s' st_value 0x%lx below base 0x%lx",
+                      static_cast<int>(name.size()), name.data(),
+                      static_cast<unsigned long>(sym->st_value),
+                      static_cast<unsigned long>(base_vaddr));
+  uint64_t off = sym->st_value - base_vaddr;
+  if (off > image.size() || sym->st_size > image.size() - off)
+    return unexpected(ERANGE,
+                      "symbol '%.*s' at offset 0x%lx + size 0x%lx overflows "
+                      "image of %zu bytes",
+                      static_cast<int>(name.size()), name.data(),
+                      static_cast<unsigned long>(off),
+                      static_cast<unsigned long>(sym->st_size), image.size());
+
+  auto *ptr = static_cast<std::byte *>(image.data()) + off;
   return std::span{ptr, sym->st_size};
 }
 
@@ -187,16 +211,36 @@ std::expected<Kernel, Error> Executable::kernel(std::string_view name) const {
     return unexpected(EINVAL, "symbol '%.*s' not a kernel descriptor",
                       static_cast<int>(name.size()), name.data());
 
-  void *address =
-      static_cast<std::byte *>(image.data()) + sym->st_value - base_vaddr;
-  auto descriptor = KFD_TRY(elf.symbol_address(*sym));
+  if (sym->st_value < base_vaddr)
+    return unexpected(ERANGE, "kernel '%.*s' st_value 0x%lx below base 0x%lx",
+                      static_cast<int>(name.size()), name.data(),
+                      static_cast<unsigned long>(sym->st_value),
+                      static_cast<unsigned long>(base_vaddr));
+  uint64_t kd_off = sym->st_value - base_vaddr;
+  if (kd_off > image.size() || sym->st_size > image.size() - kd_off)
+    return unexpected(ERANGE,
+                      "kernel '%.*s' at offset 0x%lx + size 0x%lx overflows "
+                      "image of %zu bytes",
+                      static_cast<int>(name.size()), name.data(),
+                      static_cast<unsigned long>(kd_off),
+                      static_cast<unsigned long>(sym->st_size), image.size());
 
+  auto descriptor = KFD_TRY(elf.symbol_address(*sym));
   const abi::KernelDescriptor *kd =
       reinterpret_cast<const abi::KernelDescriptor *>(descriptor);
+
+  int64_t entry_off =
+      kd->kernel_code_entry_byte_offset + static_cast<int64_t>(kd_off);
+  if (entry_off < 0 || static_cast<uint64_t>(entry_off) >= image.size())
+    return unexpected(ERANGE,
+                      "kernel '%.*s' entry offset 0x%lx outside image "
+                      "of %zu bytes",
+                      static_cast<int>(name.size()), name.data(),
+                      static_cast<unsigned long>(entry_off), image.size());
+
   Kernel kernel{
       .descriptor = kd,
-      .address = reinterpret_cast<void *>(kd->kernel_code_entry_byte_offset +
-                                          reinterpret_cast<intptr_t>(address)),
+      .address = static_cast<std::byte *>(image.data()) + entry_off,
   };
   return kernel;
 }

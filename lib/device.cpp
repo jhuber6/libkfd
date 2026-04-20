@@ -5,6 +5,8 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "libkfd/device.h"
+
 #include "ioctl.h"
 #include "libkfd/abi.h"
 #include "libkfd/context.h"

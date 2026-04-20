@@ -37,7 +37,7 @@ Event::~Event() {
     return;
 
   ioctl::kfd::destroy_event_args args{.event_id = id};
-  ioctl::call<ioctl::kfd::DESTROY_EVENT>(fd, args);
+  KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_EVENT>(fd, args));
 }
 
 Event::Event(Event &&other)

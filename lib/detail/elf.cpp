@@ -221,8 +221,9 @@ std::expected<ELF64LE, Error> ELF64LE::create(std::span<const std::byte> buf) {
 
   uint64_t ph_table = static_cast<uint64_t>(ehdr.e_phnum) *
                       static_cast<uint64_t>(ehdr.e_phentsize);
-  if (ehdr.e_phnum && (ph_table / ehdr.e_phentsize != ehdr.e_phnum ||
-                       ehdr.e_phoff > buf.size() - ph_table))
+  if (ehdr.e_phnum &&
+      (ph_table / ehdr.e_phentsize != ehdr.e_phnum || ph_table > buf.size() ||
+       ehdr.e_phoff > buf.size() - ph_table))
     return kfd::unexpected(ERANGE, "phdrs end past buffer %zu", buf.size());
 
   if (ehdr.e_shnum && ehdr.e_shentsize < sizeof(Elf64_Shdr))
@@ -232,8 +233,9 @@ std::expected<ELF64LE, Error> ELF64LE::create(std::span<const std::byte> buf) {
 
   uint64_t sh_table = static_cast<uint64_t>(ehdr.e_shnum) *
                       static_cast<uint64_t>(ehdr.e_shentsize);
-  if (ehdr.e_shnum && (sh_table / ehdr.e_shentsize != ehdr.e_shnum ||
-                       ehdr.e_shoff > buf.size() - sh_table))
+  if (ehdr.e_shnum &&
+      (sh_table / ehdr.e_shentsize != ehdr.e_shnum || sh_table > buf.size() ||
+       ehdr.e_shoff > buf.size() - sh_table))
     return kfd::unexpected(ERANGE, "sections end past buffer %zu", buf.size());
 
   if (ehdr.e_shnum && ehdr.e_shstrndx >= ehdr.e_shnum)
@@ -347,7 +349,7 @@ const Elf64_Shdr *ELF64LE::strtab_for_symtab(const Elf64_Shdr &symtab) const {
 
 std::span<const Elf64_Sym>
 ELF64LE::symbols_for(const Elf64_Shdr &symtab) const {
-  if (symtab.sh_entsize < sizeof(Elf64_Sym) || symtab.sh_size > buf.size() ||
+  if (symtab.sh_entsize != sizeof(Elf64_Sym) || symtab.sh_size > buf.size() ||
       symtab.sh_offset > buf.size() - symtab.sh_size)
     return {};
   auto count = static_cast<size_t>(symtab.sh_size / symtab.sh_entsize);
@@ -385,6 +387,9 @@ const Elf64_Sym *lookup_gnu_hash(std::string_view name, const Elf64_GnuHash &ht,
       static_cast<uint64_t>(ht.nbuckets) * sizeof(Elf64_Word);
   uint64_t min_size = header_bytes + filter_bytes + bucket_bytes;
   if (min_size < header_bytes || min_size > ht_size)
+    return nullptr;
+
+  if (ht.shift2 >= 32)
     return nullptr;
 
   uint32_t name_hash = hash_gnu(name);
@@ -482,19 +487,34 @@ ELF64LE::symbol_address(const Elf64_Sym &sym) const {
   if (sec.sh_type == SHT_NOBITS)
     return kfd::unexpected(ENOEXEC, "symbol in NOBITS section");
 
-  if (sym.st_value < sec.sh_addr || sym.st_value - sec.sh_addr > sec.sh_size)
+  if (sec.sh_size > UINT64_MAX - sec.sh_addr)
+    return kfd::unexpected(ERANGE, "section addr 0x%lx + size 0x%lx wraps",
+                           static_cast<unsigned long>(sec.sh_addr),
+                           static_cast<unsigned long>(sec.sh_size));
+
+  uint64_t sec_rel = sym.st_value - sec.sh_addr;
+  if (sym.st_value < sec.sh_addr || sec_rel > sec.sh_size ||
+      sym.st_size > sec.sh_size - sec_rel)
     return kfd::unexpected(
         ERANGE,
-        "symbol value 0x%lx outside section "
+        "symbol value 0x%lx + size 0x%lx outside section "
         "[0x%lx, 0x%lx)",
         static_cast<unsigned long>(sym.st_value),
+        static_cast<unsigned long>(sym.st_size),
         static_cast<unsigned long>(sec.sh_addr),
         static_cast<unsigned long>(sec.sh_addr + sec.sh_size));
 
-  uint64_t offset = sec.sh_offset + (sym.st_value - sec.sh_addr);
-  if (offset > buf.size())
-    return kfd::unexpected(ERANGE, "symbol file offset 0x%lx past buffer %zu",
-                           static_cast<unsigned long>(offset), buf.size());
+  if (sec_rel > UINT64_MAX - sec.sh_offset)
+    return kfd::unexpected(ERANGE, "section offset 0x%lx + rel 0x%lx wraps",
+                           static_cast<unsigned long>(sec.sh_offset),
+                           static_cast<unsigned long>(sec_rel));
+  uint64_t offset = sec.sh_offset + sec_rel;
+  if (offset >= buf.size() || sym.st_size > buf.size() - offset)
+    return kfd::unexpected(ERANGE,
+                           "symbol file offset 0x%lx + size 0x%lx past "
+                           "buffer of %zu bytes",
+                           static_cast<unsigned long>(offset),
+                           static_cast<unsigned long>(sym.st_size), buf.size());
 
   return buf.data() + offset;
 }
@@ -506,7 +526,7 @@ SymbolRange ELF64LE::symbols() const {
       continue;
 
     auto shdrs = sections();
-    if (shdr.sh_link >= shdrs.size() || !shdr.sh_entsize)
+    if (shdr.sh_link >= shdrs.size() || shdr.sh_entsize != sizeof(Elf64_Sym))
       break;
 
     auto sym_data = section_data(shdr);

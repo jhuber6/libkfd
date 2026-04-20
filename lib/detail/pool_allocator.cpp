@@ -63,7 +63,9 @@ std::expected<void, Error> PoolAllocator::deallocate(void *ptr, size_t size) {
   auto *base = managed.data();
   auto *p = static_cast<std::byte *>(ptr);
   if (p < base || p >= base + managed.size())
-    return {};
+    return unexpected(EINVAL, "deallocate %p outside managed region [%p, %p)",
+                      ptr, static_cast<void *>(base),
+                      static_cast<void *>(base + managed.size()));
 
   size_t offset = static_cast<size_t>(p - base);
   size_t rounded = (size + align - 1) & ~(align - 1);

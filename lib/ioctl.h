@@ -101,7 +101,7 @@ std::expected<void, Error> call(int fd, Args &args,
     ret = ::ioctl(fd, cmd, &args);
   } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
   if (ret == -1)
-    return unexpected(errno);
+    return unexpected(errno, "ioctl failed: %lu", Request);
   return {};
 }
 

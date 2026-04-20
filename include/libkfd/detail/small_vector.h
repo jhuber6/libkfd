@@ -178,6 +178,8 @@ private:
 
   std::expected<void, Error> grow() {
     size_t new_cap = cap ? cap * 2 : 4;
+    if (new_cap < cap || new_cap > static_cast<size_t>(-1) / sizeof(T))
+      return unexpected(ENOMEM, "SmallVector grow overflow at cap %zu", cap);
     T *buf = static_cast<T *>(std::malloc(new_cap * sizeof(T)));
     if (!buf)
       return unexpected(ENOMEM, "SmallVector grow to %zu elements failed",

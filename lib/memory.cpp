@@ -51,10 +51,11 @@ void Buffer::destroy() {
         .device_ids_array_ptr = reinterpret_cast<uintptr_t>(mapped_ids.data()),
         .n_devices = static_cast<uint32_t>(mapped_ids.size()),
     };
-    ioctl::call<ioctl::kfd::UNMAP_MEMORY_FROM_GPU>(ctx.kfd_fd(), args);
+    KFD_ASSERT(
+        ioctl::call<ioctl::kfd::UNMAP_MEMORY_FROM_GPU>(ctx.kfd_fd(), args));
   }
   ioctl::kfd::free_memory_of_gpu_args args{.handle = handle};
-  ioctl::call<ioctl::kfd::FREE_MEMORY_OF_GPU>(ctx.kfd_fd(), args);
+  KFD_ASSERT(ioctl::call<ioctl::kfd::FREE_MEMORY_OF_GPU>(ctx.kfd_fd(), args));
   handle = 0;
 }
 
@@ -174,7 +175,7 @@ std::expected<void, Error> Buffer::map(std::span<Device *const> targets) {
         break;
       }
     if (!found)
-      (void)mapped_ids.push_back(id);
+      KFD_ASSERT(mapped_ids.push_back(id));
   }
 
   return {};

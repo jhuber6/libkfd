@@ -101,14 +101,14 @@ uint32_t scratch_dispatch_slots(const Device &dev, Dim3 grid, Dim3 block) {
 
   // GFX10+ uses a multiple of 256 for more efficient SE scheduling.
   if (dev.gfx_version() >= abi::GFX_VERSION_GFX10_1) {
-    uint32_t min_groups =
+    uint32_t min_occupancy =
         threads_per_group > 0
             ? align_up(static_cast<uint32_t>(threads_per_group), 256u)
             : 1;
-    if (min_groups > 16)
-      min_groups = 16;
-    if (max_groups_per_se < min_groups)
-      max_groups_per_se = min_groups;
+    if (min_occupancy > 16)
+      min_occupancy = 16;
+    if (max_groups_per_se < min_occupancy)
+      max_groups_per_se = min_occupancy;
   }
 
   uint64_t concurrent_groups = uint64_t(max_groups_per_se) * num_se;

@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <expected>
 
@@ -19,8 +20,6 @@ namespace kfd {
 struct Error {
   int code;
   char msg[128] = {};
-
-  Error(int c) : code(c) {}
 
   explicit operator int() const { return code; }
 
@@ -97,5 +96,15 @@ inline std::unexpected<Error> unexpected(int code, const char *fmt, ...) {
     }                                                                          \
     *std::move(_kfd_tmp);                                                      \
   })
+
+// Assert that the expression succeeds or abort on failure.
+#define KFD_ASSERT(expr)                                                       \
+  do {                                                                         \
+    if (auto &&_kfd_tmp = (expr); !_kfd_tmp) {                                 \
+      std::fprintf(stderr, "assertion failed: %s\n",                           \
+                   ::kfd::strerror(_kfd_tmp));                                 \
+      std::abort();                                                            \
+    }                                                                          \
+  } while (0)
 
 #endif // LIBKFD_ERROR_H
