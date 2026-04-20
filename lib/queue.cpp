@@ -112,9 +112,9 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
       wave_num = cu_num * 32;
     }
     uint32_t debug_mem = align_up(wave_num * 32u, 64u);
-    size_t total_cwsr = align_up(
-        static_cast<size_t>(props.cwsr_size + debug_mem) * props.num_xcc,
-        page_size());
+    size_t total_cwsr =
+        align_up(static_cast<size_t>(props.cwsr_size + debug_mem) * num_xcc,
+                 page_size());
 
     auto cwsr_region = KFD_TRY(MappedRegion::create(total_cwsr));
     std::memset(cwsr_region.data(), 0, cwsr_region.size());

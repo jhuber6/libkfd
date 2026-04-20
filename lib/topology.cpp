@@ -7,9 +7,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "libkfd/topology.h"
+#include "libkfd/abi.h"
 #include "libkfd/detail/mapped_region.h"
 #include "libkfd/detail/utility.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <fcntl.h>
@@ -371,6 +373,60 @@ std::expected<NodeInfo, Error> read_node(uint32_t index) {
   return NodeInfo{props, std::move(banks), std::move(caches), std::move(links)};
 }
 
+// VGPR file size per CU, keyed by gfx_target_version. Matches the kernel's
+// kfd_get_vgpr_size_per_cu().
+uint32_t vgpr_size_per_cu(uint32_t gfxv) {
+  if (gfxv == abi::GFX_VERSION_GFX942 || gfxv == abi::GFX_VERSION_GFX9_A ||
+      gfxv == abi::GFX_VERSION_GFX9_8 || gfxv == abi::GFX_VERSION_GFX950)
+    return 0x80000;
+  if (gfxv == abi::GFX_VERSION_GFX11 || gfxv == abi::GFX_VERSION_GFX1101 ||
+      gfxv == abi::GFX_VERSION_GFX1151 || gfxv == abi::GFX_VERSION_GFX12 ||
+      gfxv == abi::GFX_VERSION_GFX1201)
+    return 0x60000;
+  return 0x40000;
+}
+
+// Mirrors the kernel's kfd_queue_ctx_save_restore_size().
+std::pair<uint32_t, uint32_t> compute_cwsr_sizes(const NodeProperties &props) {
+  uint32_t gfxv = props.gfx_target_version;
+  constexpr uint32_t SGPR_SIZE_PER_CU = 0x4000;
+  constexpr uint32_t LDS_SIZE_PER_CU = 0x10000;
+  constexpr uint32_t HWREG_SIZE_PER_CU = 0x1000;
+  constexpr uint32_t CWSR_HEADER_SIZE = sizeof(abi::CwsrHeader);
+
+  uint32_t num_xcc = props.num_xcc ? props.num_xcc : 1;
+  uint32_t cu_num = props.simd_count / props.simd_per_cu / num_xcc;
+
+  uint32_t wave_num;
+  if (gfxv < abi::GFX_VERSION_GFX10_1) {
+    uint32_t simd_arrays_per_engine =
+        props.simd_arrays_per_engine ? props.simd_arrays_per_engine : 1;
+    uint32_t max_waves = props.array_count / simd_arrays_per_engine * 512;
+    wave_num = std::min(cu_num * 40, max_waves);
+  } else {
+    wave_num = cu_num * 32;
+  }
+
+  uint32_t lds_per_cu = (gfxv == abi::GFX_VERSION_GFX950)
+                            ? (props.lds_size_in_kb << 10)
+                            : LDS_SIZE_PER_CU;
+  uint32_t wg_data_per_cu = vgpr_size_per_cu(gfxv) + SGPR_SIZE_PER_CU +
+                            lds_per_cu + HWREG_SIZE_PER_CU;
+  uint32_t wg_data_size = static_cast<uint32_t>(
+      align_up(size_t{cu_num} * wg_data_per_cu, page_size()));
+
+  uint32_t cntl_stack_bytes = (gfxv >= abi::GFX_VERSION_GFX10_1) ? 12u : 8u;
+  uint32_t ctl_stack_size = wave_num * cntl_stack_bytes + 8;
+  ctl_stack_size = align_up(CWSR_HEADER_SIZE + ctl_stack_size,
+                            static_cast<uint32_t>(page_size()));
+
+  uint32_t gfx_major_family = (gfxv / 10000) * 10000;
+  if (gfx_major_family == 100000)
+    ctl_stack_size = std::min(ctl_stack_size, 0x7000u);
+
+  return {ctl_stack_size + wg_data_size, ctl_stack_size};
+}
+
 } // namespace
 
 std::expected<Topology, Error> Topology::create() {
@@ -389,6 +445,13 @@ std::expected<Topology, Error> Topology::create() {
       auto node = KFD_TRY(read_node(i));
       if (node.props.gpu_id == 0)
         continue;
+
+      // Linux 6.19+ added this as a property, calculate it otherwise.
+      if (!node.props.cwsr_size || !node.props.ctl_stack_size) {
+        auto [cwsr_size, ctl_stack_size] = compute_cwsr_sizes(node.props);
+        node.props.cwsr_size = cwsr_size;
+        node.props.ctl_stack_size = ctl_stack_size;
+      }
       KFD_CHECK(topo.storage.push_back(std::move(node)));
     }
 

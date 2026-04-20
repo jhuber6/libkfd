@@ -18,10 +18,17 @@
 namespace kfd::abi {
 
 // Constants to determine the current ISA.
-inline constexpr uint32_t GFX_VERSION_GFX10_1 = 100100;
 inline constexpr uint32_t GFX_VERSION_GFX9 = 90000;
+inline constexpr uint32_t GFX_VERSION_GFX9_8 = 90008;
+inline constexpr uint32_t GFX_VERSION_GFX9_A = 90010;
+inline constexpr uint32_t GFX_VERSION_GFX942 = 90402;
+inline constexpr uint32_t GFX_VERSION_GFX950 = 90500;
+inline constexpr uint32_t GFX_VERSION_GFX10_1 = 100100;
 inline constexpr uint32_t GFX_VERSION_GFX11 = 110000;
+inline constexpr uint32_t GFX_VERSION_GFX1101 = 110001;
+inline constexpr uint32_t GFX_VERSION_GFX1151 = 110501;
 inline constexpr uint32_t GFX_VERSION_GFX12 = 120000;
+inline constexpr uint32_t GFX_VERSION_GFX1201 = 120001;
 
 // Required alignment for the private scratch region.
 constexpr size_t PRIVATE_SEGMENT_ALIGN = 0x10000;
