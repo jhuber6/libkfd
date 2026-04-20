@@ -43,7 +43,7 @@ depend on any C++ runtime features. The library handles:
 - **CMake >= 3.28**
 - **Ninja** (recommended) or Make
 - **libdrm** with amdgpu support (`libdrm_amdgpu` via pkg-config)
-- **Linux kernel with KFD enabled** (typically `CONFIG_HSA_AMD=y`)
+- **Linux kernel >= 6.7 with KFD enabled** (typically `CONFIG_HSA_AMD=y`)
 - An AMDGPU -- GFX9 (Vega), GFX10 (RDNA 1/2), GFX11 (RDNA 3), or GFX12
   (RDNA 4)
 
