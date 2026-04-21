@@ -79,20 +79,21 @@ uint32_t scratch_device_slots(const Device &dev) {
   uint32_t simd_per_cu = p.simd_per_cu ? p.simd_per_cu : 1;
   uint32_t num_cus = p.simd_count / simd_per_cu;
   uint32_t num_se = scratch_num_se(dev);
+
   // The Shader Processor Input (SPI) assigns slots per-SE, so we round up to
   // the number of SEs to produce the max slots needed for the device.
   uint32_t slots = align_up(num_cus, num_se) * p.max_slots_scratch_cu;
   return slots ? slots : num_se;
 }
 
-size_t scratch_alloc_size(const Device &dev, uint32_t per_thread,
+size_t scratch_alloc_size(uint32_t gfx_version, uint32_t per_thread,
                           uint32_t slots) {
   if (per_thread == 0 || slots == 0)
     return 0;
 
-  size_t per_wave = static_cast<size_t>(SCRATCH_LANES_PER_WAVE) * per_thread;
-  uint32_t align = scratch_alignment_unit(dev.gfx_version());
-  per_wave = align_up(per_wave, static_cast<size_t>(align));
+  size_t per_wave =
+      align_up(static_cast<size_t>(SCRATCH_LANES_PER_WAVE) * per_thread,
+               static_cast<size_t>(scratch_alignment_unit(gfx_version)));
 
   size_t needed = per_wave * slots;
   return align_up(needed, abi::PRIVATE_SEGMENT_ALIGN);

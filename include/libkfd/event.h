@@ -36,6 +36,7 @@ public:
 
   // These all identify the event, the kernel uses this ID to quickly find the
   // correct event to check and signal, falling back to an exhaustive search.
+  // Slot index is the logical page index, while event id is internal to kfd.
   uint32_t trigger_data() const { return trigger; }
   uint32_t event_id() const { return id; }
   uint32_t slot_index() const { return slot_idx; }

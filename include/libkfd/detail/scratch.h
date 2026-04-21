@@ -23,9 +23,8 @@ namespace kfd::detail {
 // allocate 64-lane slots.
 inline constexpr uint32_t SCRATCH_LANES_PER_WAVE = 64;
 
-// COMPUTE_TMPRING_SIZE.WAVESIZE granularity: 1024B pre-GFX11, 256B GFX11+.
-// References: LLVM SIDefines.h S_00B860_WAVESIZE_*;
-//             ROCr amd_aql_queue.cpp mem_alignment_size
+// COMPUTE_TMPRING_SIZE.WAVESIZE granularity, 1024B pre-GFX11, 256B GFX11+.
+// Reference: LLVM SIDefines.h S_00B860_WAVESIZE_*;
 inline uint32_t scratch_alignment_unit(uint32_t gfx_version) {
   return gfx_version >= abi::GFX_VERSION_GFX11 ? 256 : 1024;
 }
@@ -76,7 +75,7 @@ uint32_t compute_tmpring_size(const Device &dev, uint32_t per_thread,
 uint32_t scratch_device_slots(const Device &dev);
 
 // Backing allocation size for the given per-thread need and wave slot count.
-size_t scratch_alloc_size(const Device &dev, uint32_t per_thread,
+size_t scratch_alloc_size(uint32_t gfx_version, uint32_t per_thread,
                           uint32_t slots);
 
 } // namespace kfd::detail

@@ -252,8 +252,7 @@ private:
   explicit ComputeQueue(QueueBase &&b, Buffer &&vram)
       : eop_seq(std::move(vram)), base(std::move(b)) {}
 
-  std::expected<void, Error> ensure_scratch(uint32_t per_thread, Dim3 grid,
-                                            Dim3 block);
+  std::expected<void, Error> ensure_scratch(uint32_t per_thread, Dim3 block);
 
   std::expected<void, Error> try_scratch_alloc(uint32_t per_thread,
                                                uint32_t slots);

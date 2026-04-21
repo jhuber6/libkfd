@@ -157,7 +157,6 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
 
   // Ensure all the queue memory is committed before submitting it.
   memory_barrier();
-
   ioctl::kfd::create_queue_args args{
       .ring_base_address = reinterpret_cast<uintptr_t>(ring_buf.data()),
       .write_pointer_address = reinterpret_cast<uintptr_t>(&ctl->write_ptr),
@@ -408,7 +407,8 @@ ComputeQueue::release_scratch_region(void *va, size_t size, Buffer *bo) {
 
 std::expected<void, Error> ComputeQueue::try_scratch_alloc(uint32_t per_thread,
                                                            uint32_t slots) {
-  size_t alloc_size = detail::scratch_alloc_size(*base.dev, per_thread, slots);
+  size_t alloc_size =
+      detail::scratch_alloc_size(base.dev->gfx_version(), per_thread, slots);
   if (alloc_size == 0)
     return {};
 
@@ -451,7 +451,7 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
 
   detail::LockGuard guard(base.submit_mtx);
 
-  if (auto r = ensure_scratch(private_segment_size, cfg.grid, cfg.block); !r)
+  if (auto r = ensure_scratch(private_segment_size, cfg.block); !r)
     return r;
 
   const void *dispatch_pkt_addr = nullptr;
@@ -486,7 +486,7 @@ uint32_t ComputeQueue::build_signal_packet(uint32_t *buf, Signal &sig) {
 }
 
 std::expected<void, Error> ComputeQueue::ensure_scratch(uint32_t needed,
-                                                        Dim3 grid, Dim3 block) {
+                                                        Dim3 block) {
   if (needed <= scratch_per_thread)
     return {};
 
@@ -523,21 +523,19 @@ std::expected<void, Error> ComputeQueue::ensure_scratch(uint32_t needed,
     scratch_region_size = 0;
   }
 
-  auto retry = [](const std::expected<void, Error> &r) {
-    return !r && r.error().code == ENOMEM;
-  };
-
-  // Size scratch to the full device capacity, If scratch memory is exhausted ,
+  // Size scratch to the full device capacity, If scratch memory is exhausted,
   // progressively reduce the wave count until something fits.
   uint32_t slots = detail::scratch_device_slots(*base.dev);
   uint32_t num_se = detail::scratch_num_se(*base.dev);
   uint32_t waves_per_group =
-      static_cast<uint32_t>((uint64_t(block.x) * block.y * block.z +
-                             detail::SCRATCH_LANES_PER_WAVE - 1) /
-                            detail::SCRATCH_LANES_PER_WAVE);
-  if (waves_per_group == 0)
-    waves_per_group = 1;
+      detail::max(static_cast<uint32_t>((uint64_t(block.x) * block.y * block.z +
+                                         detail::SCRATCH_LANES_PER_WAVE - 1) /
+                                        detail::SCRATCH_LANES_PER_WAVE),
+                  1u);
 
+  auto retry = [](const std::expected<void, Error> &r) {
+    return !r && r.error().code == ENOMEM;
+  };
   uint32_t min_slots = 2 * num_se;
   while (slots >= min_slots) {
     if (auto r = try_scratch_alloc(needed, slots); !retry(r))
