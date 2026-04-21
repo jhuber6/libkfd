@@ -8,6 +8,7 @@
 #ifndef LIBKFD_DETAIL_POOL_ALLOCATOR_H
 #define LIBKFD_DETAIL_POOL_ALLOCATOR_H
 
+#include "libkfd/detail/box.h"
 #include "libkfd/detail/mutex.h"
 #include "libkfd/detail/small_vector.h"
 #include "libkfd/error.h"
@@ -47,10 +48,11 @@ private:
   };
 
   PoolAllocator(std::span<std::byte> region, size_t alignment,
-                SmallVector<Block, 8> &&blocks)
-      : managed(region), align(alignment), free_list(std::move(blocks)) {}
+                SmallVector<Block, 8> &&blocks, Box<Mutex> mtx)
+      : mutex(std::move(mtx)), managed(region), align(alignment),
+        free_list(std::move(blocks)) {}
 
-  Mutex mutex;
+  Box<Mutex> mutex;
   std::span<std::byte> managed;
   size_t align = 0;
   SmallVector<Block, 8> free_list;

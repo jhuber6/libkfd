@@ -247,6 +247,7 @@ std::expected<Device, Error> Device::create(Context &ctx, NodeInfo info) {
 
   uint32_t gpu_id = info.props.gpu_id;
   Device dev(ctx, std::move(info));
+  dev.doorbell_mtx = KFD_TRY(detail::Box<detail::Mutex>::create());
   for (uint32_t i = 0; i < total; ++i) {
     if (raw[i].gpu_id == gpu_id) {
       dev.gpuvm_base = raw[i].gpuvm_base;
@@ -305,6 +306,7 @@ Device::Device(Device &&other)
       scratch_aperture_base(other.scratch_aperture_base),
       scratch_aperture_limit(other.scratch_aperture_limit),
       doorbells(std::move(other.doorbells)),
+      doorbell_mtx(std::move(other.doorbell_mtx)),
       trap_tba(std::move(other.trap_tba)), trap_tma(std::move(other.trap_tma)),
       scratch_reservation(std::move(other.scratch_reservation)),
       scratch_allocator(std::move(other.scratch_allocator)) {
@@ -317,7 +319,7 @@ static constexpr size_t DOORBELL_PAGE_SIZE = 8192;
 
 std::expected<volatile uint64_t *, Error>
 Device::doorbell(uint64_t raw_offset) {
-  detail::LockGuard guard(doorbell_mtx);
+  detail::LockGuard guard(*doorbell_mtx);
 
   if (!doorbells) {
     auto reservation = KFD_TRY(MappedRegion::reserve(DOORBELL_PAGE_SIZE));
@@ -367,8 +369,10 @@ Device::doorbell(uint64_t raw_offset) {
       return kfd::unexpected(r.error());
     }
 
-    doorbells = Buffer(alloc_args.handle, DOORBELL_PAGE_SIZE,
-                       std::move(*mapping), std::move(ids), this);
+    auto buf_mtx = KFD_TRY(detail::Box<detail::Mutex>::create());
+    doorbells =
+        Buffer(alloc_args.handle, DOORBELL_PAGE_SIZE, std::move(*mapping),
+               std::move(ids), this, std::move(buf_mtx));
   }
 
   uint32_t slot_off =

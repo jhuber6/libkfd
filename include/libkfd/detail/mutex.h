@@ -20,8 +20,8 @@ public:
 
   Mutex(const Mutex &) = delete;
   Mutex &operator=(const Mutex &) = delete;
-  Mutex(Mutex &&) = default;
-  Mutex &operator=(Mutex &&) = default;
+  Mutex(Mutex &&) = delete;
+  Mutex &operator=(Mutex &&) = delete;
 
   void lock() {
     uint32_t expected = UNLOCKED;

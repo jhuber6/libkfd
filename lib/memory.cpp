@@ -36,15 +36,16 @@ using namespace kfd::detail;
 namespace kfd {
 
 Buffer::Buffer(uint64_t h, size_t sz, MappedRegion mapping,
-               SmallVector<uint32_t, 2> mapped_ids, Device *owner)
-    : len(sz), handle(h), mapping(std::move(mapping)),
+               SmallVector<uint32_t, 2> mapped_ids, Device *owner,
+               Box<Mutex> mtx)
+    : len(sz), handle(h), mapping(std::move(mapping)), mtx(std::move(mtx)),
       mapped_ids(std::move(mapped_ids)), owner(owner) {}
 
 void Buffer::destroy() {
   if (handle == 0)
     return;
   Context &ctx = owner->context();
-  LockGuard guard(mtx);
+  LockGuard guard(*mtx);
   if (!mapped_ids.empty()) {
     ioctl::kfd::unmap_memory_from_gpu_args args{
         .handle = handle,
@@ -68,7 +69,7 @@ void Buffer::release_device() {
 
 Buffer::Buffer(Buffer &&other)
     : len(std::exchange(other.len, 0)), handle(std::exchange(other.handle, 0)),
-      mapping(std::move(other.mapping)),
+      mapping(std::move(other.mapping)), mtx(std::move(other.mtx)),
       mapped_ids(std::move(other.mapped_ids)),
       owner(std::exchange(other.owner, nullptr)) {}
 
@@ -78,6 +79,7 @@ Buffer &Buffer::operator=(Buffer &&other) {
     handle = std::exchange(other.handle, 0);
     len = std::exchange(other.len, 0);
     mapping = std::move(other.mapping);
+    mtx = std::move(other.mtx);
     mapped_ids = std::move(other.mapped_ids);
     owner = std::exchange(other.owner, nullptr);
   }
@@ -117,7 +119,9 @@ std::expected<Buffer, Error> Buffer::allocate(Device &dev, size_t size,
     return kfd::unexpected(rebound.error());
   }
 
-  return Buffer(alloc_args.handle, size, std::move(*rebound), {}, &dev);
+  auto mtx = KFD_TRY(Box<Mutex>::create());
+  return Buffer(alloc_args.handle, size, std::move(*rebound), {}, &dev,
+                std::move(mtx));
 }
 
 std::expected<Buffer, Error> Buffer::pin(Device &dev, void *ptr, size_t size) {
@@ -138,7 +142,8 @@ std::expected<Buffer, Error> Buffer::pin(Device &dev, void *ptr, size_t size) {
   KFD_CHECK(
       ioctl::call<ioctl::kfd::ALLOC_MEMORY_OF_GPU>(ctx.kfd_fd(), alloc_args));
 
-  return Buffer(alloc_args.handle, size, {}, {}, &dev);
+  auto mtx = KFD_TRY(Box<Mutex>::create());
+  return Buffer(alloc_args.handle, size, {}, {}, &dev, std::move(mtx));
 }
 
 std::expected<void, Error> Buffer::map(std::span<Device *const> targets) {
@@ -153,7 +158,7 @@ std::expected<void, Error> Buffer::map(std::span<Device *const> targets) {
       return r;
 
   {
-    LockGuard guard(mtx);
+    LockGuard guard(*mtx);
     KFD_CHECK(mapped_ids.reserve(mapped_ids.size() + ids.size()));
   }
 
@@ -166,7 +171,7 @@ std::expected<void, Error> Buffer::map(std::span<Device *const> targets) {
       !r)
     return r;
 
-  LockGuard guard(mtx);
+  LockGuard guard(*mtx);
   for (auto id : ids) {
     bool found = false;
     for (size_t i = 0; i < mapped_ids.size(); ++i)
@@ -207,7 +212,7 @@ std::expected<void, Error> Buffer::unmap(std::span<Device *const> targets) {
       !r)
     return r;
 
-  LockGuard guard(mtx);
+  LockGuard guard(*mtx);
   for (auto id : ids) {
     for (size_t i = 0; i < mapped_ids.size(); ++i) {
       if (mapped_ids[i] == id) {

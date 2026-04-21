@@ -200,9 +200,10 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
     return kfd::unexpected(db_slot.error());
   }
 
+  auto mtx = KFD_TRY(detail::Box<detail::Mutex>::create());
   QueueBase q(type, ctx, dev, args.queue_id, std::move(ctl_buf),
               std::move(ring_buf), std::move(eop_buf), std::move(cwsr_buf),
-              *db_slot, std::move(err_ev));
+              *db_slot, std::move(err_ev), std::move(mtx));
 
   if (q.err_event) {
     auto *payload = reinterpret_cast<uint64_t *>(&q.ctl()->err_payload);
@@ -216,10 +217,11 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
 QueueBase::QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
                      Buffer control, Buffer ring, Buffer eop,
                      detail::MappedRegion cwsr, volatile uint64_t *doorbell,
-                     Event err_event)
+                     Event err_event, detail::Box<detail::Mutex> submit_mtx)
     : type(type), ctx(&ctx), dev(&dev), id(id), control(std::move(control)),
       ring(std::move(ring)), eop(std::move(eop)), cwsr(std::move(cwsr)),
-      doorbell(doorbell), err_event(std::move(err_event)) {}
+      doorbell(doorbell), err_event(std::move(err_event)),
+      submit_mtx(std::move(submit_mtx)) {}
 
 QueueBase::~QueueBase() {
   if (!ctx)
@@ -242,6 +244,7 @@ QueueBase::QueueBase(QueueBase &&other)
       eop(std::move(other.eop)), cwsr(std::move(other.cwsr)),
       doorbell(std::exchange(other.doorbell, nullptr)),
       err_event(std::move(other.err_event)),
+      submit_mtx(std::move(other.submit_mtx)),
       pending_wptr(std::exchange(other.pending_wptr, 0)),
       scratch_bo(std::move(other.scratch_bo)),
       scratch_va(std::exchange(other.scratch_va, nullptr)),
@@ -273,6 +276,7 @@ QueueBase &QueueBase::operator=(QueueBase &&other) {
   cwsr = std::move(other.cwsr);
   doorbell = std::exchange(other.doorbell, nullptr);
   err_event = std::move(other.err_event);
+  submit_mtx = std::move(other.submit_mtx);
   pending_wptr = std::exchange(other.pending_wptr, 0);
   scratch_bo = std::move(other.scratch_bo);
   scratch_va = std::exchange(other.scratch_va, nullptr);
@@ -311,7 +315,7 @@ std::expected<void, Error> QueueBase::wait_for_room(uint32_t dwords) {
 
 std::expected<void, Error> QueueBase::submit(const uint32_t *data,
                                              size_t n_dwords) {
-  detail::LockGuard guard(submit_mtx);
+  detail::LockGuard guard(*submit_mtx);
   return submit_impl(data, n_dwords);
 }
 
@@ -449,7 +453,7 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
   else if (!private_segment_size)
     private_segment_size = /*8 KiB=*/8 * 1024;
 
-  detail::LockGuard guard(base.submit_mtx);
+  detail::LockGuard guard(*base.submit_mtx);
 
   if (auto r = ensure_scratch(private_segment_size, cfg.block); !r)
     return r;

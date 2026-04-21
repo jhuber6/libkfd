@@ -12,6 +12,7 @@
 #define LIBKFD_QUEUE_H
 
 #include "libkfd/abi.h"
+#include "libkfd/detail/box.h"
 #include "libkfd/detail/mutex.h"
 #include "libkfd/detail/utility.h"
 #include "libkfd/device.h"
@@ -78,7 +79,8 @@ private:
   QueueBase() = default;
   QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
             Buffer control, Buffer ring, Buffer eop, detail::MappedRegion cwsr,
-            volatile uint64_t *doorbell, Event err_event);
+            volatile uint64_t *doorbell, Event err_event,
+            detail::Box<detail::Mutex> submit_mtx);
 
   std::expected<void, Error> submit(const uint32_t *data, size_t dwords);
   std::expected<void, Error> submit_impl(const uint32_t *data, size_t dwords);
@@ -100,7 +102,7 @@ private:
 
   volatile uint64_t *doorbell = nullptr;
   Event err_event;
-  detail::Mutex submit_mtx;
+  detail::Box<detail::Mutex> submit_mtx;
 
   uint64_t pending_wptr = 0;
 
