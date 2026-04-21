@@ -44,6 +44,7 @@ public:
 
   uint32_t event_id() const { return event.event_id(); }
   uint32_t trigger_data() const { return event.trigger_data(); }
+  Event *event_ptr() { return &event; }
   int kfd_fd() const;
 
   // Clears any pending events and resets the signal value.

@@ -30,6 +30,7 @@
 namespace kfd {
 
 class Context;
+struct QueueErrorCtx;
 
 enum class QueueType : uint8_t {
   COMPUTE = /*KFD_IOC_QUEUE_TYPE_COMPUTE=*/0x0,
@@ -79,7 +80,7 @@ private:
   QueueBase() = default;
   QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
             Buffer control, Buffer ring, Buffer eop, detail::MappedRegion cwsr,
-            volatile uint64_t *doorbell, Event err_event,
+            volatile uint64_t *doorbell, detail::Box<Event> err_event,
             detail::Box<detail::Mutex> submit_mtx);
 
   std::expected<void, Error> submit(const uint32_t *data, size_t dwords);
@@ -89,6 +90,7 @@ private:
     return static_cast<QueueControl *>(control.data());
   }
   std::expected<void, Error> wait_for_room(uint32_t dwords);
+  static void queue_error_handler(Event &event, void *user_data);
 
   QueueType type{};
   Context *ctx = nullptr;
@@ -101,7 +103,8 @@ private:
   detail::MappedRegion cwsr;
 
   volatile uint64_t *doorbell = nullptr;
-  Event err_event;
+  detail::Box<Event> err_event;
+  detail::Box<QueueErrorCtx> err_watch_ctx;
   detail::Box<detail::Mutex> submit_mtx;
 
   uint64_t pending_wptr = 0;
@@ -141,8 +144,7 @@ public:
       uint32_t chunk = remaining < max ? remaining : max;
       uint32_t buf[pm4::DMA_DATA_DWORDS];
       pm4::dma_data_copy(buf, d, s, chunk);
-      if (auto r = base.submit(buf, pm4::DMA_DATA_DWORDS); !r)
-        return r;
+      KFD_CHECK(base.submit(buf, pm4::DMA_DATA_DWORDS));
       d += chunk;
       s += chunk;
       remaining -= chunk;
@@ -161,8 +163,7 @@ public:
       uint32_t chunk = remaining < max ? remaining : max;
       uint32_t buf[pm4::DMA_DATA_DWORDS];
       pm4::dma_data_fill(buf, d, value, chunk);
-      if (auto r = base.submit(buf, pm4::DMA_DATA_DWORDS); !r)
-        return r;
+      KFD_CHECK(base.submit(buf, pm4::DMA_DATA_DWORDS));
       d += chunk;
       remaining -= chunk;
     }
@@ -297,8 +298,7 @@ public:
           static_cast<uint32_t>(bytes < max_bytes ? bytes : max_bytes);
       uint32_t buf[sdma::COPY_LINEAR_DWORDS];
       sdma::copy_linear(buf, d, s, chunk);
-      if (auto r = base.submit(buf, sdma::COPY_LINEAR_DWORDS); !r)
-        return r;
+      KFD_CHECK(base.submit(buf, sdma::COPY_LINEAR_DWORDS));
       d += chunk;
       s += chunk;
       bytes -= chunk;

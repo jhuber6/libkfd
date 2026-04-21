@@ -8,7 +8,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "libkfd/signal.h"
-#include "ioctl.h"
 #include "libkfd/context.h"
 #include "libkfd/detail/small_vector.h"
 #include "libkfd/detail/utility.h"
@@ -62,29 +61,16 @@ bool check_all(std::span<Signal *> signals, Condition cond, uint64_t value) {
   return true;
 }
 
-std::expected<void, Error> event_wait(int fd, std::span<Signal *> signals,
+std::expected<void, Error> event_wait(std::span<Signal *> signals,
                                       bool wait_for_all, uint32_t timeout_ms) {
-  auto n = static_cast<uint32_t>(signals.size());
-  detail::SmallVector<ioctl::kfd::event_data, 8> eds;
-  KFD_CHECK(eds.resize(n));
-  for (uint32_t i = 0; i < n; ++i) {
-    eds[i] = {};
-    eds[i].event_id = signals[i]->event_id();
-  }
-  ioctl::kfd::wait_events_args args{
-      .events_ptr = reinterpret_cast<uintptr_t>(eds.data()),
-      .num_events = n,
-      .wait_for_all = wait_for_all,
-      .timeout = timeout_ms,
-  };
-  if (auto r = ioctl::call<ioctl::kfd::WAIT_EVENTS>(fd, args); !r)
-    return r;
-  if (args.wait_result == KFD_IOC_WAIT_RESULT_TIMEOUT)
-    return kfd::unexpected(ETIMEDOUT, "signal wait timed out after %u ms",
-                           timeout_ms);
-  if (args.wait_result != KFD_IOC_WAIT_RESULT_COMPLETE)
-    return kfd::unexpected(EIO, "signal wait failed (wait_result=%u)",
-                           args.wait_result);
+  detail::SmallVector<Event *, 8> events;
+  for (auto *s : signals)
+    KFD_CHECK(events.push_back(s->event_ptr()));
+  if (wait_for_all)
+    return kfd::wait_all({events.data(), events.size()}, timeout_ms);
+  auto r = kfd::wait_any({events.data(), events.size()}, timeout_ms);
+  if (!r)
+    return kfd::unexpected(r.error());
   return {};
 }
 
@@ -106,8 +92,7 @@ std::expected<Signal, Error> Signal::create(Context &ctx, uint64_t initial) {
 int Signal::kfd_fd() const { return event.kfd_fd(); }
 
 std::expected<void, Error> Signal::reset(uint64_t value) {
-  if (auto r = event.reset(); !r)
-    return r;
+  KFD_CHECK(event.reset());
   __atomic_store_n(fence, value, __ATOMIC_RELEASE);
   return {};
 }
@@ -136,7 +121,6 @@ std::expected<void, Error> wait_all(std::span<Signal *> signals, Condition cond,
   if (signals.empty())
     return {};
 
-  int fd = signals.front()->kfd_fd();
   uint64_t start = now_ns();
   uint64_t spin_deadline = add_sat(start, spin_ns);
   uint64_t abs_deadline = add_sat(start, timeout_ns);
@@ -159,7 +143,7 @@ std::expected<void, Error> wait_all(std::span<Signal *> signals, Condition cond,
     uint32_t wait_ms = remaining_ms > UINT32_MAX
                            ? UINT32_MAX
                            : static_cast<uint32_t>(remaining_ms);
-    if (auto r = event_wait(fd, signals, true, wait_ms); !r) {
+    if (auto r = event_wait(signals, true, wait_ms); !r) {
       if (r.error().code == ETIMEDOUT)
         continue;
       return r;
@@ -173,7 +157,6 @@ std::expected<size_t, Error> wait_any(std::span<Signal *> signals,
   if (signals.empty())
     return kfd::unexpected(EINVAL, "wait_any called with no signals");
 
-  int fd = signals.front()->kfd_fd();
   uint64_t start = now_ns();
   uint64_t spin_deadline = add_sat(start, spin_ns);
   uint64_t abs_deadline = add_sat(start, timeout_ns);
@@ -198,7 +181,7 @@ std::expected<size_t, Error> wait_any(std::span<Signal *> signals,
     uint32_t wait_ms = remaining_ms > UINT32_MAX
                            ? UINT32_MAX
                            : static_cast<uint32_t>(remaining_ms);
-    if (auto r = event_wait(fd, signals, false, wait_ms); !r) {
+    if (auto r = event_wait(signals, false, wait_ms); !r) {
       if (r.error().code == ETIMEDOUT)
         continue;
       return kfd::unexpected(r.error());

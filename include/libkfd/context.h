@@ -8,6 +8,7 @@
 #ifndef LIBKFD_CONTEXT_H
 #define LIBKFD_CONTEXT_H
 
+#include "libkfd/detail/box.h"
 #include "libkfd/detail/small_vector.h"
 #include "libkfd/device.h"
 #include "libkfd/error.h"
@@ -15,6 +16,12 @@
 #include <cstdint>
 
 namespace kfd {
+
+class Event;
+struct FaultWatcher;
+
+// Callback invoked by the fault watcher when a watched event fires.
+using WatchCallback = void (*)(Event &event, void *user_data);
 
 struct VersionInfo {
   uint32_t major;
@@ -56,16 +63,15 @@ private:
   std::expected<uint64_t *, Error> event_slot(uint32_t id);
   std::expected<uint64_t *, Error> fence_slot(uint32_t id);
 
-  void register_queue_error(uint32_t event_id, volatile uint64_t *payload,
-                            uint32_t queue_id, uint32_t gpu_id);
-  void unregister_queue_error(uint32_t event_id);
+  std::expected<void, Error> watch_event(Event &event, WatchCallback cb,
+                                         void *user_data = nullptr);
+  std::expected<void, Error> unwatch_event(Event &event);
 
-  explicit Context(int fd, bool xnack, detail::SmallVector<Device, 4> devices)
-      : fd(fd), xnack(xnack), nodes(std::move(devices)) {}
+  explicit Context(int fd, bool xnack, detail::SmallVector<Device, 4> devices);
   int fd;
   bool xnack = false;
   detail::SmallVector<Device, 4> nodes;
-  void *fault_watcher = nullptr;
+  detail::Box<FaultWatcher> fault_watcher;
 };
 
 } // namespace kfd

@@ -71,20 +71,16 @@ public:
   }
 
   [[nodiscard]] std::expected<void, Error> push_back(const T &value) {
-    if (count == cap) {
-      if (auto r = grow(); !r)
-        return r;
-    }
+    if (count == cap)
+      KFD_CHECK(grow());
     ::new (ptr + count) T(value);
     ++count;
     return {};
   }
 
   [[nodiscard]] std::expected<void, Error> push_back(T &&value) {
-    if (count == cap) {
-      if (auto r = grow(); !r)
-        return r;
-    }
+    if (count == cap)
+      KFD_CHECK(grow());
     ::new (ptr + count) T(std::move(value));
     ++count;
     return {};
@@ -144,10 +140,8 @@ public:
   bool empty() const { return count == 0; }
 
   [[nodiscard]] std::expected<void, Error> resize(size_t n) {
-    if (n > cap) {
-      if (auto r = reserve(n); !r)
-        return r;
-    }
+    if (n > cap)
+      KFD_CHECK(reserve(n));
     for (size_t i = count; i < n; ++i)
       ::new (ptr + i) T{};
     for (size_t i = n; i < count; ++i)

@@ -13,7 +13,9 @@
 
 #include <bit>
 #include <cerrno>
+#include <csignal>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 
@@ -27,6 +29,12 @@ static_assert(static_cast<uint8_t>(kfd::QueueType::SDMA_XGMI) ==
 using namespace kfd::detail;
 
 namespace kfd {
+
+struct QueueErrorCtx {
+  uint64_t *err_payload;
+  uint32_t queue_id;
+  uint32_t gpu_id;
+};
 
 namespace {
 
@@ -67,7 +75,35 @@ std::expected<void, Error> register_svm(int kfd_fd, void *addr, size_t size,
   return ioctl::call<ioctl::kfd::SVM>(kfd_fd, *args, ATTR_BYTES);
 }
 
+void report_queue_exception(uint32_t queue_id, uint32_t gpu_id, uint64_t code) {
+  std::fprintf(stderr, "GPU queue exception (queue %u, gpu_id %u): code 0x%lx",
+               queue_id, gpu_id, static_cast<unsigned long>(code));
+  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_ABORT))
+    std::fprintf(stderr, " wave-abort");
+  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_TRAP))
+    std::fprintf(stderr, " wave-trap");
+  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_MATH_ERROR))
+    std::fprintf(stderr, " math-error");
+  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_ILLEGAL_INSTRUCTION))
+    std::fprintf(stderr, " illegal-inst");
+  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_MEMORY_VIOLATION))
+    std::fprintf(stderr, " mem-violation");
+  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_APERTURE_VIOLATION))
+    std::fprintf(stderr, " aperture-violation");
+  std::fprintf(stderr, "\n");
+}
+
 } // namespace
+
+void QueueBase::queue_error_handler(Event &, void *user_data) {
+  auto *ectx = static_cast<QueueErrorCtx *>(user_data);
+  uint64_t err = __atomic_load_n(ectx->err_payload, __ATOMIC_ACQUIRE);
+  if (err) {
+    report_queue_exception(ectx->queue_id, ectx->gpu_id, err);
+    __atomic_store_n(ectx->err_payload, 0, __ATOMIC_RELEASE);
+    ::raise(SIGABRT);
+  }
+}
 
 // Create a queue to communicate with the device's command processor. Each queue
 // is a ring buffer that consumes variable length packets for the processor.
@@ -94,7 +130,7 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
   // The header wires up err_payload_addr and err_event_id so KFD can
   // signal queue exceptions (traps, illegal instructions, etc.).
   MappedRegion cwsr_buf;
-  Event err_ev;
+  detail::Box<Event> err_ev;
   const NodeProperties &props = dev.properties();
   if (is_compute && props.cwsr_size > 0) {
     uint32_t simd_per_cu = props.simd_per_cu ? props.simd_per_cu : 1;
@@ -120,8 +156,8 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
     std::memset(cwsr_region.data(), 0, cwsr_region.size());
 
     // Each queue has an event for the CWSR to handle device-side interrupts.
-    err_ev = KFD_TRY(Event::create(ctx));
-    uint32_t err_event_id = err_ev.event_id();
+    auto raw_ev = KFD_TRY(Event::create(ctx));
+    err_ev = KFD_TRY(detail::Box<Event>::create(std::move(raw_ev)));
 
     for (uint32_t i = 0; i < num_xcc; ++i) {
       auto *hdr = reinterpret_cast<abi::CwsrHeader *>(
@@ -130,7 +166,7 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
       hdr->debug_offset = (num_xcc - i) * props.cwsr_size;
       hdr->debug_size = debug_mem * num_xcc;
       hdr->err_payload_addr = reinterpret_cast<uint64_t>(&ctl->err_payload);
-      hdr->err_event_id = err_event_id;
+      hdr->err_event_id = err_ev->event_id();
     }
 
     // CWSR can fire at any time so we must ensure that the pages are resident.
@@ -196,7 +232,7 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
       dev.doorbell(args.doorbell_offset);
   if (!db_slot) {
     ioctl::kfd::destroy_queue_args dq{.queue_id = args.queue_id};
-    ioctl::call<ioctl::kfd::DESTROY_QUEUE>(ctx.kfd_fd(), dq);
+    KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_QUEUE>(ctx.kfd_fd(), dq));
     return kfd::unexpected(db_slot.error());
   }
 
@@ -206,9 +242,11 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
               *db_slot, std::move(err_ev), std::move(mtx));
 
   if (q.err_event) {
-    auto *payload = reinterpret_cast<uint64_t *>(&q.ctl()->err_payload);
-    ctx.register_queue_error(q.err_event.event_id(), payload, q.id,
-                             dev.gpu_id());
+    q.err_watch_ctx = KFD_TRY(detail::Box<QueueErrorCtx>::create(
+        QueueErrorCtx{reinterpret_cast<uint64_t *>(&q.ctl()->err_payload), q.id,
+                      dev.gpu_id()}));
+    KFD_CHECK(ctx.watch_event(*q.err_event, queue_error_handler,
+                              q.err_watch_ctx.get()));
   }
 
   return q;
@@ -217,7 +255,8 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
 QueueBase::QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
                      Buffer control, Buffer ring, Buffer eop,
                      detail::MappedRegion cwsr, volatile uint64_t *doorbell,
-                     Event err_event, detail::Box<detail::Mutex> submit_mtx)
+                     detail::Box<Event> err_event,
+                     detail::Box<detail::Mutex> submit_mtx)
     : type(type), ctx(&ctx), dev(&dev), id(id), control(std::move(control)),
       ring(std::move(ring)), eop(std::move(eop)), cwsr(std::move(cwsr)),
       doorbell(doorbell), err_event(std::move(err_event)),
@@ -227,7 +266,7 @@ QueueBase::~QueueBase() {
   if (!ctx)
     return;
   if (err_event)
-    ctx->unregister_queue_error(err_event.event_id());
+    KFD_ASSERT(ctx->unwatch_event(*err_event));
   ioctl::kfd::destroy_queue_args args{.queue_id = id};
   KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_QUEUE>(ctx->kfd_fd(), args));
   if (scratch_va) {
@@ -244,6 +283,7 @@ QueueBase::QueueBase(QueueBase &&other)
       eop(std::move(other.eop)), cwsr(std::move(other.cwsr)),
       doorbell(std::exchange(other.doorbell, nullptr)),
       err_event(std::move(other.err_event)),
+      err_watch_ctx(std::move(other.err_watch_ctx)),
       submit_mtx(std::move(other.submit_mtx)),
       pending_wptr(std::exchange(other.pending_wptr, 0)),
       scratch_bo(std::move(other.scratch_bo)),
@@ -256,7 +296,7 @@ QueueBase &QueueBase::operator=(QueueBase &&other) {
 
   if (ctx) {
     if (err_event)
-      ctx->unregister_queue_error(err_event.event_id());
+      KFD_ASSERT(ctx->unwatch_event(*err_event));
     ioctl::kfd::destroy_queue_args dq{.queue_id = id};
     KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_QUEUE>(ctx->kfd_fd(), dq));
     if (scratch_va) {
@@ -276,6 +316,7 @@ QueueBase &QueueBase::operator=(QueueBase &&other) {
   cwsr = std::move(other.cwsr);
   doorbell = std::exchange(other.doorbell, nullptr);
   err_event = std::move(other.err_event);
+  err_watch_ctx = std::move(other.err_watch_ctx);
   submit_mtx = std::move(other.submit_mtx);
   pending_wptr = std::exchange(other.pending_wptr, 0);
   scratch_bo = std::move(other.scratch_bo);
@@ -362,8 +403,7 @@ std::expected<void, Error> QueueBase::submit_impl(const uint32_t *data,
     pos = 0;
   }
 
-  if (auto r = wait_for_room(n); !r)
-    return r;
+  KFD_CHECK(wait_for_room(n));
 
   std::memcpy(base + pos, data, n * sizeof(uint32_t));
   pending_wptr += n;
@@ -455,8 +495,7 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
 
   detail::LockGuard guard(*base.submit_mtx);
 
-  if (auto r = ensure_scratch(private_segment_size, cfg.block); !r)
-    return r;
+  KFD_CHECK(ensure_scratch(private_segment_size, cfg.block));
 
   const void *dispatch_pkt_addr = nullptr;
   if (kd.kernel_code_properties & abi::ENABLE_SGPR_DISPATCH_PTR)
@@ -512,11 +551,9 @@ std::expected<void, Error> ComputeQueue::ensure_scratch(uint32_t needed,
     // We are inside the queue mutex.
     uint32_t buf[SIGNAL_DWORDS];
     uint32_t n = build_signal_packet(buf, sig);
-    if (auto r = base.submit_impl(buf, n); !r)
-      return r;
+    KFD_CHECK(base.submit_impl(buf, n));
 
-    if (auto r = sig.wait(Condition::EQ, 0, UINT64_MAX); !r)
-      return r;
+    KFD_CHECK(sig.wait(Condition::EQ, 0, UINT64_MAX));
 
     KFD_CHECK(release_scratch_region(base.scratch_va, base.scratch_size,
                                      &base.scratch_bo));

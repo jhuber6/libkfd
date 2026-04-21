@@ -38,8 +38,7 @@ make_fixture(kfd::Context &ctx, kfd::Dim3 grid = {.x = 1},
 }
 
 void dispatch_nop(SignalFixture &fix) {
-  REQUIRE_RESULT(
-      fix.compute.dispatch(fix.nop, fix.nop_cfg, fix.nop_kernarg));
+  REQUIRE_RESULT(fix.compute.dispatch(fix.nop, fix.nop_cfg, fix.nop_kernarg));
 }
 
 } // namespace
@@ -250,22 +249,12 @@ TEST_CASE("Signal stress - threaded signals on shared queue",
     signals.push_back(std::move(*sig));
   }
 
-  std::atomic<unsigned> failures{0};
-
   auto worker = [&](unsigned tid) {
     for (unsigned i = 0; i < ITERS; ++i) {
-      if (i > 0 && !signals[tid].reset().has_value()) {
-        failures.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
-      if (!queue->signal(signals[tid]).has_value()) {
-        failures.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
-      if (!signals[tid]
-               .wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS)
-               .has_value())
-        failures.fetch_add(1, std::memory_order_relaxed);
+      REQUIRE_RESULT(signals[tid].reset());
+      REQUIRE_RESULT(queue->signal(signals[tid]));
+      REQUIRE_RESULT(
+          signals[tid].wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
     }
   };
 
@@ -275,8 +264,6 @@ TEST_CASE("Signal stress - threaded signals on shared queue",
     threads.emplace_back(worker, t);
   for (auto &th : threads)
     th.join();
-
-  CHECK(failures.load() == 0);
 }
 
 TEST_CASE("Signal stress - threaded signals on separate queues",
@@ -300,22 +287,12 @@ TEST_CASE("Signal stress - threaded signals on separate queues",
     signals.push_back(std::move(*sig));
   }
 
-  std::atomic<unsigned> failures{0};
-
   auto worker = [&](unsigned tid) {
     for (unsigned i = 0; i < ITERS; ++i) {
-      if (i > 0 && !signals[tid].reset().has_value()) {
-        failures.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
-      if (!queues[tid].signal(signals[tid]).has_value()) {
-        failures.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
-      if (!signals[tid]
-               .wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS)
-               .has_value())
-        failures.fetch_add(1, std::memory_order_relaxed);
+      REQUIRE_RESULT(signals[tid].reset());
+      REQUIRE_RESULT(queues[tid].signal(signals[tid]));
+      REQUIRE_RESULT(
+          signals[tid].wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
     }
   };
 
@@ -325,8 +302,6 @@ TEST_CASE("Signal stress - threaded signals on separate queues",
     threads.emplace_back(worker, t);
   for (auto &th : threads)
     th.join();
-
-  CHECK(failures.load() == 0);
 }
 
 TEST_CASE("Signal - wait_any returns first completed signal",
@@ -535,26 +510,13 @@ TEST_CASE("Signal stress - threaded dispatch+signal on shared queue",
     signals.push_back(std::move(*sig));
   }
 
-  std::atomic<unsigned> failures{0};
-
   auto worker = [&](unsigned tid) {
     for (unsigned i = 0; i < ITERS; ++i) {
-      if (i > 0 && !signals[tid].reset().has_value()) {
-        failures.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
-      if (!fix->compute.dispatch(fix->nop, cfg, *kernarg).has_value()) {
-        failures.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
-      if (!fix->compute.signal(signals[tid]).has_value()) {
-        failures.fetch_add(1, std::memory_order_relaxed);
-        continue;
-      }
-      if (!signals[tid]
-               .wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS)
-               .has_value())
-        failures.fetch_add(1, std::memory_order_relaxed);
+      REQUIRE_RESULT(signals[tid].reset());
+      REQUIRE_RESULT(fix->compute.dispatch(fix->nop, cfg, *kernarg));
+      REQUIRE_RESULT(fix->compute.signal(signals[tid]));
+      REQUIRE_RESULT(
+          signals[tid].wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
     }
   };
 
@@ -564,8 +526,6 @@ TEST_CASE("Signal stress - threaded dispatch+signal on shared queue",
     threads.emplace_back(worker, t);
   for (auto &th : threads)
     th.join();
-
-  CHECK(failures.load() == 0);
 }
 
 TEST_CASE("Signal stress - threaded counting signal from shared queue",
@@ -583,15 +543,9 @@ TEST_CASE("Signal stress - threaded counting signal from shared queue",
   auto sig = kfd::Signal::create(ctx, N_THREADS);
   REQUIRE_RESULT(sig);
 
-  std::atomic<unsigned> failures{0};
-
   auto worker = [&](unsigned) {
-    if (!fix->compute.dispatch(fix->nop, cfg, *kernarg).has_value()) {
-      failures.fetch_add(1, std::memory_order_relaxed);
-      return;
-    }
-    if (!fix->compute.signal(*sig).has_value())
-      failures.fetch_add(1, std::memory_order_relaxed);
+    REQUIRE_RESULT(fix->compute.dispatch(fix->nop, cfg, *kernarg));
+    REQUIRE_RESULT(fix->compute.signal(*sig));
   };
 
   std::vector<std::thread> threads;
@@ -601,6 +555,5 @@ TEST_CASE("Signal stress - threaded counting signal from shared queue",
   for (auto &th : threads)
     th.join();
 
-  CHECK(failures.load() == 0);
   REQUIRE_RESULT(sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
 }

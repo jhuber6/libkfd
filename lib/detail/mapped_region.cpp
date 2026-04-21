@@ -8,12 +8,16 @@
 
 #include <cerrno>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <sys/mman.h>
 #include <utility>
 
 namespace kfd::detail {
+
+static std::expected<void, Error> checked_munmap(void *addr, size_t len) {
+  if (::munmap(addr, len) != 0)
+    return kfd::unexpected(errno, "munmap failed: %p, %zu", addr, len);
+  return {};
+}
 
 std::expected<MappedRegion, Error> MappedRegion::create(size_t length, int prot,
                                                         int flags) {
@@ -58,9 +62,10 @@ MappedRegion::reserve_aligned(size_t length, size_t alignment) {
   region->release();
 
   if (prefix)
-    ::munmap(reinterpret_cast<void *>(raw), prefix);
+    KFD_ASSERT(checked_munmap(reinterpret_cast<void *>(raw), prefix));
   if (suffix)
-    ::munmap(reinterpret_cast<void *>(aligned + length), suffix);
+    KFD_ASSERT(
+        checked_munmap(reinterpret_cast<void *>(aligned + length), suffix));
 
   return MappedRegion(reinterpret_cast<void *>(aligned), length);
 }
@@ -80,20 +85,14 @@ std::expected<MappedRegion, Error> MappedRegion::rebind(int fd, int prot,
 }
 
 MappedRegion::~MappedRegion() {
-  if (addr && ::munmap(addr, len) != 0) {
-    std::fprintf(stderr, "assertion failed: munmap(%p, %zu): %s\n", addr, len,
-                 std::strerror(errno));
-    std::abort();
-  }
+  if (addr)
+    KFD_ASSERT(checked_munmap(addr, len));
 }
 
 MappedRegion &MappedRegion::operator=(MappedRegion &&other) {
   if (this != &other) {
-    if (addr && ::munmap(addr, len) != 0) {
-      std::fprintf(stderr, "assertion failed: munmap(%p, %zu): %s\n", addr, len,
-                   std::strerror(errno));
-      std::abort();
-    }
+    if (addr)
+      KFD_ASSERT(checked_munmap(addr, len));
     addr = std::exchange(other.addr, nullptr);
     len = std::exchange(other.len, 0);
   }

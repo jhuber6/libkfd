@@ -349,7 +349,8 @@ Device::doorbell(uint64_t raw_offset) {
     if (!mapping) {
       ioctl::kfd::free_memory_of_gpu_args free_args{.handle =
                                                         alloc_args.handle};
-      ioctl::call<ioctl::kfd::FREE_MEMORY_OF_GPU>(ctx->kfd_fd(), free_args);
+      KFD_ASSERT(ioctl::call<ioctl::kfd::FREE_MEMORY_OF_GPU>(ctx->kfd_fd(),
+                                                             free_args));
       return kfd::unexpected(mapping.error());
     }
 
@@ -365,7 +366,8 @@ Device::doorbell(uint64_t raw_offset) {
         !r) {
       ioctl::kfd::free_memory_of_gpu_args free_args{.handle =
                                                         alloc_args.handle};
-      ioctl::call<ioctl::kfd::FREE_MEMORY_OF_GPU>(ctx->kfd_fd(), free_args);
+      KFD_ASSERT(ioctl::call<ioctl::kfd::FREE_MEMORY_OF_GPU>(ctx->kfd_fd(),
+                                                             free_args));
       return kfd::unexpected(r.error());
     }
 

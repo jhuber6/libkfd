@@ -13,7 +13,6 @@
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <linux/futex.h>
@@ -27,6 +26,12 @@ using namespace kfd::detail;
 namespace kfd {
 
 namespace {
+
+std::expected<void, Error> checked_munmap(void *addr, size_t len) {
+  if (::munmap(addr, len) != 0)
+    return kfd::unexpected(errno, "munmap failed: %p, %zu", addr, len);
+  return {};
+}
 
 struct SignalPage {
   void *addr;
@@ -68,21 +73,32 @@ Mutex signal_page_mtx{};
 uint32_t runtime_enabled = 0;
 Mutex runtime_mtx{};
 
-constexpr size_t WATCHER_STACK_SIZE = 64ull * 1024;
+} // namespace
 
-struct QueueErrorEntry {
-  uint32_t event_id;
-  volatile uint64_t *err_payload;
-  uint32_t queue_id;
-  uint32_t gpu_id;
-};
+constexpr size_t WATCHER_STACK_SIZE = 64ull * 1024;
 
 struct FaultWatcher {
   FaultWatcher(Event mem, Event hw, Event wake, void *stack)
       : mem_event(std::move(mem)), hw_event(std::move(hw)),
         wake_event(std::move(wake)), stack(stack) {}
 
-  int kfd_fd() const { return mem_event.kfd_fd(); }
+  ~FaultWatcher() {
+    if (tid != 0) {
+      __atomic_store_n(&exit_flag, 1, __ATOMIC_RELEASE);
+      KFD_ASSERT(wake_event.signal());
+      for (pid_t val; (val = __atomic_load_n(&tid, __ATOMIC_ACQUIRE)) != 0;)
+        ::syscall(SYS_futex, &tid, FUTEX_WAIT, val, nullptr, nullptr, 0);
+    }
+    if (stack)
+      KFD_ASSERT(checked_munmap(stack, WATCHER_STACK_SIZE));
+  }
+
+  struct WatchEntry {
+    Event *event;
+    WatchCallback callback;
+    void *user_data;
+    uint32_t event_id;
+  };
 
   Event mem_event;
   Event hw_event;
@@ -90,37 +106,19 @@ struct FaultWatcher {
   uint32_t exit_flag = 0;
   pid_t tid = 0;
   void *stack;
-  Mutex queue_mtx;
-  SmallVector<QueueErrorEntry, 8> queue_errors;
+  Mutex watch_mtx;
+  SmallVector<WatchEntry, 8> watches;
 };
 
-// Exception bitmask flags written to err_payload_addr by KFD.
-void report_queue_exception(uint32_t queue_id, uint32_t gpu_id, uint64_t code) {
-  std::fprintf(stderr, "GPU queue exception (queue %u, gpu_id %u): code 0x%lx",
-               queue_id, gpu_id, static_cast<unsigned long>(code));
-  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_ABORT))
-    std::fprintf(stderr, " wave-abort");
-  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_TRAP))
-    std::fprintf(stderr, " wave-trap");
-  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_MATH_ERROR))
-    std::fprintf(stderr, " math-error");
-  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_ILLEGAL_INSTRUCTION))
-    std::fprintf(stderr, " illegal-inst");
-  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_MEMORY_VIOLATION))
-    std::fprintf(stderr, " mem-violation");
-  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_APERTURE_VIOLATION))
-    std::fprintf(stderr, " aperture-violation");
-  std::fprintf(stderr, "\n");
-}
+namespace {
 
 int fault_watcher_entry(void *arg) {
   auto *w = static_cast<FaultWatcher *>(arg);
 
+  // We cannot use the raw Event * interface because the user could move the
+  // events and the independent watcher thread would not be updated.
   SmallVector<ioctl::kfd::event_data, 16> eds;
-
   while (!__atomic_load_n(&w->exit_flag, __ATOMIC_ACQUIRE)) {
-    // Rebuild the event list each iteration: system events first, then
-    // per-queue error events, then the wake event last.
     eds.clear();
 
     ioctl::kfd::event_data mem_ed{};
@@ -132,11 +130,11 @@ int fault_watcher_entry(void *arg) {
     KFD_ASSERT(eds.push_back(hw_ed));
 
     {
-      LockGuard guard(w->queue_mtx);
-      for (auto &qe : w->queue_errors) {
-        ioctl::kfd::event_data qed{};
-        qed.event_id = qe.event_id;
-        KFD_ASSERT(eds.push_back(qed));
+      LockGuard guard(w->watch_mtx);
+      for (auto &we : w->watches) {
+        ioctl::kfd::event_data ed{};
+        ed.event_id = we.event_id;
+        KFD_ASSERT(eds.push_back(ed));
       }
     }
 
@@ -144,16 +142,13 @@ int fault_watcher_entry(void *arg) {
     wake_ed.event_id = w->wake_event.event_id();
     KFD_ASSERT(eds.push_back(wake_ed));
 
-    // Multi-event wait-any with event_data inspection is not covered by
-    // Event::wait(), so the raw ioctl is used here.
     ioctl::kfd::wait_events_args wait{
         .events_ptr = reinterpret_cast<uintptr_t>(eds.data()),
         .num_events = static_cast<uint32_t>(eds.size()),
         .wait_for_all = 0,
         .timeout = UINT32_MAX,
     };
-
-    auto r = ioctl::call<ioctl::kfd::WAIT_EVENTS>(w->kfd_fd(), wait);
+    auto r = ioctl::call<ioctl::kfd::WAIT_EVENTS>(w->mem_event.kfd_fd(), wait);
     if (!r || wait.wait_result != KFD_IOC_WAIT_RESULT_COMPLETE)
       continue;
 
@@ -174,8 +169,6 @@ int fault_watcher_entry(void *arg) {
       if (d.failure.imprecise)
         std::fprintf(stderr, " imprecise");
       std::fprintf(stderr, "\n");
-      std::memset(&eds[0].memory_exception_data, 0,
-                  sizeof(eds[0].memory_exception_data));
       ::raise(SIGSEGV);
     }
 
@@ -185,20 +178,12 @@ int fault_watcher_entry(void *arg) {
                    "GPU HW exception (gpu_id %u): reset_type=%u "
                    "reset_cause=%u memory_lost=%u\n",
                    d.gpu_id, d.reset_type, d.reset_cause, d.memory_lost);
-      std::memset(&eds[1].hw_exception_data, 0,
-                  sizeof(eds[1].hw_exception_data));
       ::raise(SIGABRT);
     }
 
-    LockGuard guard(w->queue_mtx);
-    for (auto &qe : w->queue_errors) {
-      uint64_t err = __atomic_load_n(qe.err_payload, __ATOMIC_ACQUIRE);
-      if (err) {
-        report_queue_exception(qe.queue_id, qe.gpu_id, err);
-        __atomic_store_n(qe.err_payload, 0, __ATOMIC_RELEASE);
-        ::raise(SIGABRT);
-      }
-    }
+    LockGuard guard(w->watch_mtx);
+    for (auto &we : w->watches)
+      we.callback(*we.event, we.user_data);
   }
 
   return 0;
@@ -206,94 +191,62 @@ int fault_watcher_entry(void *arg) {
 
 // Start the dedicated fault watcher background thread. This will sleep until an
 // abnormal event from the process or a queue wakes it and handles it.
-std::expected<FaultWatcher *, Error> start_fault_watcher(Context &ctx) {
-  auto mem_ev = KFD_TRY(Event::create(ctx, KFD_IOC_EVENT_MEMORY));
-  auto hw_ev = KFD_TRY(Event::create(ctx, KFD_IOC_EVENT_HW_EXCEPTION));
-  auto wake_ev = KFD_TRY(Event::create(ctx, KFD_IOC_EVENT_SIGNAL));
+std::expected<Box<FaultWatcher>, Error> start_fault_watcher(Context &ctx) {
+  auto mem_ev = KFD_TRY(Event::create(ctx, EventType::MEMORY));
+  auto hw_ev = KFD_TRY(Event::create(ctx, EventType::HW_EXCEPTION));
+  auto wake_ev = KFD_TRY(Event::create(ctx, EventType::SIGNAL));
 
   void *stack = ::mmap(nullptr, WATCHER_STACK_SIZE, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
   if (stack == MAP_FAILED)
     return kfd::unexpected(errno, "failed to mmap fault watcher stack");
 
-  void *mem = std::malloc(sizeof(FaultWatcher));
-  if (!mem) {
-    ::munmap(stack, WATCHER_STACK_SIZE);
-    return kfd::unexpected(ENOMEM, "failed to allocate FaultWatcher");
+  auto result = Box<FaultWatcher>::create(std::move(mem_ev), std::move(hw_ev),
+                                          std::move(wake_ev), stack);
+  if (!result) {
+    KFD_ASSERT(checked_munmap(stack, WATCHER_STACK_SIZE));
+    return kfd::unexpected(result.error());
   }
-
-  auto *watcher = new (mem) FaultWatcher(std::move(mem_ev), std::move(hw_ev),
-                                         std::move(wake_ev), stack);
+  auto watcher = std::move(*result);
 
   // Fork to an independent thread so the KFD process is shared.
   void *stack_top = static_cast<char *>(stack) + WATCHER_STACK_SIZE;
   pid_t child = ::clone(fault_watcher_entry, stack_top,
                         CLONE_VM | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
                             CLONE_SYSVSEM | CLONE_CHILD_CLEARTID,
-                        watcher,
+                        watcher.get(),
                         /*parent_tid=*/nullptr,
                         /*tls=*/nullptr,
                         /*child_tid=*/&watcher->tid);
-  if (child == -1) {
-    int err = errno;
-    ::munmap(stack, WATCHER_STACK_SIZE);
-    watcher->~FaultWatcher();
-    std::free(watcher);
-    return kfd::unexpected(err, "failed to clone fault watcher thread");
-  }
+  if (child == -1)
+    return kfd::unexpected(errno, "failed to clone fault watcher thread");
 
   watcher->tid = child;
   return watcher;
 }
 
-// Stop the fault watcher thread at context destruction by signalling its event.
-void stop_fault_watcher(void *ptr) {
-  auto *watcher = static_cast<FaultWatcher *>(ptr);
+std::expected<void, Error> add_watch(FaultWatcher *watcher, Event *event,
+                                     WatchCallback cb, void *user_data) {
   if (!watcher)
-    return;
-
-  __atomic_store_n(&watcher->exit_flag, 1, __ATOMIC_RELEASE);
-  KFD_ASSERT(watcher->wake_event.signal());
-
-  while (__atomic_load_n(&watcher->tid, __ATOMIC_ACQUIRE) != 0)
-    ::syscall(SYS_futex, &watcher->tid, FUTEX_WAIT, watcher->tid, nullptr,
-              nullptr, 0);
-
-  void *stack = watcher->stack;
-  watcher->~FaultWatcher();
-  std::free(watcher);
-  if (::munmap(stack, WATCHER_STACK_SIZE) != 0) {
-    std::fprintf(stderr, "assertion failed: munmap(%p, %zu): %s\n", stack,
-                 static_cast<size_t>(WATCHER_STACK_SIZE), std::strerror(errno));
-    std::abort();
-  }
+    return {};
+  LockGuard guard(watcher->watch_mtx);
+  KFD_CHECK(
+      watcher->watches.push_back({event, cb, user_data, event->event_id()}));
+  return watcher->wake_event.signal();
 }
 
-void add_queue_error(void *ptr, uint32_t event_id, volatile uint64_t *payload,
-                     uint32_t queue_id, uint32_t gpu_id) {
-  auto *watcher = static_cast<FaultWatcher *>(ptr);
+std::expected<void, Error> remove_watch(FaultWatcher *watcher, Event *event) {
   if (!watcher)
-    return;
-  LockGuard guard(watcher->queue_mtx);
-  KFD_ASSERT(
-      watcher->queue_errors.push_back({event_id, payload, queue_id, gpu_id}));
-  KFD_ASSERT(watcher->wake_event.signal());
-}
-
-void remove_queue_error(void *ptr, uint32_t event_id) {
-  auto *watcher = static_cast<FaultWatcher *>(ptr);
-  if (!watcher)
-    return;
-  LockGuard guard(watcher->queue_mtx);
-  for (size_t i = 0; i < watcher->queue_errors.size(); ++i) {
-    if (watcher->queue_errors[i].event_id == event_id) {
-      watcher->queue_errors[i] =
-          watcher->queue_errors[watcher->queue_errors.size() - 1];
-      watcher->queue_errors.pop_back();
+    return {};
+  LockGuard guard(watcher->watch_mtx);
+  for (size_t i = 0; i < watcher->watches.size(); ++i) {
+    if (watcher->watches[i].event == event) {
+      watcher->watches[i] = watcher->watches[watcher->watches.size() - 1];
+      watcher->watches.pop_back();
       break;
     }
   }
-  KFD_ASSERT(watcher->wake_event.signal());
+  return watcher->wake_event.signal();
 }
 
 void free_signal_page(int kfd_fd, SmallVector<Device, 4> &devs,
@@ -311,11 +264,7 @@ void free_signal_page(int kfd_fd, SmallVector<Device, 4> &devs,
   KFD_ASSERT(ioctl::call<ioctl::kfd::UNMAP_MEMORY_FROM_GPU>(kfd_fd, uargs));
   ioctl::kfd::free_memory_of_gpu_args fargs{.handle = page.handle};
   KFD_ASSERT(ioctl::call<ioctl::kfd::FREE_MEMORY_OF_GPU>(kfd_fd, fargs));
-  if (::munmap(page.addr, page.alloc_size) != 0) {
-    std::fprintf(stderr, "assertion failed: munmap(%p, %zu): %s\n", page.addr,
-                 page.alloc_size, std::strerror(errno));
-    std::abort();
-  }
+  KFD_ASSERT(checked_munmap(page.addr, page.alloc_size));
   page.addr = nullptr;
   page.handle = 0;
 }
@@ -323,6 +272,9 @@ void free_signal_page(int kfd_fd, SmallVector<Device, 4> &devs,
 } // namespace
 
 constexpr const char KFD_PATH[] = "/dev/kfd";
+
+Context::Context(int fd, bool xnack, SmallVector<Device, 4> devices)
+    : fd(fd), xnack(xnack), nodes(std::move(devices)) {}
 
 std::expected<Context, Error> Context::create() {
   int fd = ::open(KFD_PATH, O_RDWR | O_CLOEXEC);
@@ -378,7 +330,7 @@ std::expected<Context, Error> Context::create() {
       // Register the event page with the kernel via a throwaway event.
       ioctl::kfd::create_event_args eargs{
           .event_page_offset = ep.handle,
-          .event_type = KFD_IOC_EVENT_SIGNAL,
+          .event_type = static_cast<uint32_t>(EventType::SIGNAL),
           .auto_reset = 1,
       };
       if (auto r = ioctl::call<ioctl::kfd::CREATE_EVENT>(ctx.kfd_fd(), eargs);
@@ -387,7 +339,7 @@ std::expected<Context, Error> Context::create() {
         return kfd::unexpected(r.error());
       }
       ioctl::kfd::destroy_event_args dargs{.event_id = eargs.event_id};
-      ioctl::call<ioctl::kfd::DESTROY_EVENT>(ctx.kfd_fd(), dargs);
+      KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_EVENT>(ctx.kfd_fd(), dargs));
 
       auto fp = alloc_signal_page(ctx.nodes, FENCE_PAGE_SIZE);
       if (!fp) {
@@ -433,7 +385,7 @@ std::expected<Device *, Error> Context::device(size_t i) {
 }
 
 Context::~Context() {
-  stop_fault_watcher(fault_watcher);
+  fault_watcher = {};
   nodes.clear();
   if (fd >= 0)
     ::close(fd);
@@ -442,20 +394,14 @@ Context::~Context() {
 Context::Context(Context &&other)
     : fd(std::exchange(other.fd, -1)), xnack(other.xnack),
       nodes(std::move(other.nodes)),
-      fault_watcher(std::exchange(other.fault_watcher, nullptr)) {
+      fault_watcher(std::move(other.fault_watcher)) {
   for (auto &dev : nodes)
     dev.ctx = this;
-  if (fault_watcher) {
-    auto *w = static_cast<FaultWatcher *>(fault_watcher);
-    w->mem_event.ctx = this;
-    w->hw_event.ctx = this;
-    w->wake_event.ctx = this;
-  }
 }
 
 Context &Context::operator=(Context &&other) {
   if (this != &other) {
-    stop_fault_watcher(fault_watcher);
+    fault_watcher = {};
     nodes.clear();
     if (fd >= 0)
       ::close(fd);
@@ -463,16 +409,10 @@ Context &Context::operator=(Context &&other) {
     fd = std::exchange(other.fd, -1);
     xnack = other.xnack;
     nodes = std::move(other.nodes);
-    fault_watcher = std::exchange(other.fault_watcher, nullptr);
+    fault_watcher = std::move(other.fault_watcher);
 
     for (auto &dev : nodes)
       dev.ctx = this;
-    if (fault_watcher) {
-      auto *w = static_cast<FaultWatcher *>(fault_watcher);
-      w->mem_event.ctx = this;
-      w->hw_event.ctx = this;
-      w->wake_event.ctx = this;
-    }
   }
   return *this;
 }
@@ -497,14 +437,13 @@ std::expected<uint64_t *, Error> Context::fence_slot(uint32_t id) {
   return &__atomic_load_n(&fence_page, __ATOMIC_ACQUIRE)[id];
 }
 
-void Context::register_queue_error(uint32_t event_id,
-                                   volatile uint64_t *payload,
-                                   uint32_t queue_id, uint32_t gpu_id) {
-  add_queue_error(fault_watcher, event_id, payload, queue_id, gpu_id);
+std::expected<void, Error> Context::watch_event(Event &event, WatchCallback cb,
+                                                void *user_data) {
+  return add_watch(fault_watcher.get(), &event, cb, user_data);
 }
 
-void Context::unregister_queue_error(uint32_t event_id) {
-  remove_queue_error(fault_watcher, event_id);
+std::expected<void, Error> Context::unwatch_event(Event &event) {
+  return remove_watch(fault_watcher.get(), &event);
 }
 
 } // namespace kfd

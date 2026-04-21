@@ -11,10 +11,39 @@
 #include "libkfd/error.h"
 
 #include <cstdint>
+#include <span>
 
 namespace kfd {
 
 class Context;
+
+enum class EventType : uint32_t {
+  SIGNAL = /*KFD_IOC_EVENT_SIGNAL=*/0,
+  HW_EXCEPTION = /*KFD_IOC_EVENT_HW_EXCEPTION=*/3,
+  MEMORY = /*KFD_IOC_EVENT_MEMORY=*/8,
+};
+
+struct MemoryFaultData {
+  uint64_t va;
+  uint32_t gpu_id;
+  uint32_t error_type;
+  uint32_t not_present;
+  uint32_t read_only;
+  uint32_t no_execute;
+  uint32_t imprecise;
+};
+
+struct HWExceptionData {
+  uint32_t gpu_id;
+  uint32_t reset_type;
+  uint32_t reset_cause;
+  uint32_t memory_lost;
+};
+
+struct EventData {
+  MemoryFaultData memory_fault;
+  HWExceptionData hw_exception;
+};
 
 // At context initialization we register an event page with the kernel. Each
 // event is assigned a slot index. To signal an event, the GPU writes any value
@@ -24,8 +53,8 @@ class Event {
 public:
   Event() = default;
 
-  static std::expected<Event, Error>
-  create(Context &ctx, uint32_t type = /*KFD_IOC_EVENT_SIGNAL=*/0);
+  static std::expected<Event, Error> create(Context &ctx,
+                                            EventType type = EventType::SIGNAL);
 
   ~Event();
 
@@ -55,22 +84,35 @@ public:
   // Signal from the CPU side (via kernel ioctl).
   std::expected<void, Error> signal();
 
-  explicit operator bool() const { return ctx != nullptr; }
+  // Event data populated by the kernel after a wait completes. Contains
+  // memory fault or HW exception information depending on the event type.
+  const EventData &data() const { return event_data; }
+
+  explicit operator bool() const { return fd >= 0; }
 
 private:
   friend class Context;
+  friend std::expected<void, Error> wait_all(std::span<Event *>, uint32_t);
+  friend std::expected<size_t, Error> wait_any(std::span<Event *>, uint32_t);
 
-  Event(Context *ctx, uint32_t id, uint32_t trigger, uint32_t slot_idx,
+  Event(int fd, uint32_t id, uint32_t trigger, uint32_t slot_idx,
         void *slot_addr)
-      : ctx(ctx), id(id), trigger(trigger), slot_idx(slot_idx),
+      : fd(fd), id(id), trigger(trigger), slot_idx(slot_idx),
         slot_addr(slot_addr) {}
 
-  Context *ctx = nullptr;
+  int fd = -1;
   uint32_t id = 0;
   uint32_t trigger = 0;
   uint32_t slot_idx = 0;
   void *slot_addr = nullptr;
+  EventData event_data{};
 };
+
+std::expected<void, Error> wait_all(std::span<Event *> events,
+                                    uint32_t timeout_ms = UINT32_MAX);
+
+std::expected<size_t, Error> wait_any(std::span<Event *> events,
+                                      uint32_t timeout_ms = UINT32_MAX);
 
 } // namespace kfd
 

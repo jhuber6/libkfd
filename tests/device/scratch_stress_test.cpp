@@ -32,10 +32,8 @@ dispatch_with_scratch(kfd::Device &dev, kfd::ComputeQueue &compute,
 
   auto sig = KFD_TRY(kfd::Signal::create(dev.context()));
 
-  if (auto r = compute.dispatch(nop, cfg, kernarg); !r)
-    return r;
-  if (auto r = compute.signal(sig); !r)
-    return r;
+  KFD_CHECK(compute.dispatch(nop, cfg, kernarg));
+  KFD_CHECK(compute.signal(sig));
   return sig.wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS);
 }
 

@@ -115,7 +115,8 @@ std::expected<Buffer, Error> Buffer::allocate(Device &dev, size_t size,
                                     static_cast<off_t>(alloc_args.mmap_offset));
   if (!rebound) {
     ioctl::kfd::free_memory_of_gpu_args free_args{.handle = alloc_args.handle};
-    ioctl::call<ioctl::kfd::FREE_MEMORY_OF_GPU>(ctx.kfd_fd(), free_args);
+    KFD_ASSERT(
+        ioctl::call<ioctl::kfd::FREE_MEMORY_OF_GPU>(ctx.kfd_fd(), free_args));
     return kfd::unexpected(rebound.error());
   }
 
@@ -154,8 +155,7 @@ std::expected<void, Error> Buffer::map(std::span<Device *const> targets) {
 
   SmallVector<uint32_t, 8> ids;
   for (auto *d : targets)
-    if (auto r = ids.push_back(d->gpu_id()); !r)
-      return r;
+    KFD_CHECK(ids.push_back(d->gpu_id()));
 
   {
     LockGuard guard(*mtx);
@@ -199,8 +199,7 @@ std::expected<void, Error> Buffer::unmap(std::span<Device *const> targets) {
 
   SmallVector<uint32_t, 8> ids;
   for (auto *d : targets)
-    if (auto r = ids.push_back(d->gpu_id()); !r)
-      return r;
+    KFD_CHECK(ids.push_back(d->gpu_id()));
 
   ioctl::kfd::unmap_memory_from_gpu_args args{
       .handle = handle,
