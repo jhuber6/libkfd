@@ -64,6 +64,10 @@ uint64_t *event_page = nullptr;
 uint64_t *fence_page = nullptr;
 Mutex signal_page_mtx{};
 
+// KFD runtime exception delivery, enabled once per-process.
+uint32_t runtime_enabled = 0;
+Mutex runtime_mtx{};
+
 constexpr size_t WATCHER_STACK_SIZE = 64ull * 1024;
 
 struct QueueErrorEntry {
@@ -402,11 +406,18 @@ std::expected<Context, Error> Context::create() {
   // Enable KFD's runtime exception delivery before any queues are created.
   // This activates the mechanism by which the trap handler's MSG_INTERRUPT
   // writes to err_payload_addr and signals err_event_id in the CWSR header.
-  ioctl::kfd::runtime_enable_args re{};
-  re.r_debug = 0;
-  re.mode_mask = KFD_RUNTIME_ENABLE_MODE_ENABLE_MASK |
-                 KFD_RUNTIME_ENABLE_MODE_TTMP_SAVE_MASK;
-  KFD_CHECK(ioctl::call<ioctl::kfd::RUNTIME_ENABLE>(ctx.kfd_fd(), re));
+  // This is a per-process operation so we only do it once.
+  if (!__atomic_load_n(&runtime_enabled, __ATOMIC_ACQUIRE)) {
+    LockGuard guard(runtime_mtx);
+    if (!__atomic_load_n(&runtime_enabled, __ATOMIC_RELAXED)) {
+      ioctl::kfd::runtime_enable_args re{};
+      re.r_debug = 0;
+      re.mode_mask = KFD_RUNTIME_ENABLE_MODE_ENABLE_MASK |
+                     KFD_RUNTIME_ENABLE_MODE_TTMP_SAVE_MASK;
+      KFD_CHECK(ioctl::call<ioctl::kfd::RUNTIME_ENABLE>(ctx.kfd_fd(), re));
+      __atomic_store_n(&runtime_enabled, 1, __ATOMIC_RELEASE);
+    }
+  }
 
   ctx.fault_watcher = KFD_TRY(start_fault_watcher(ctx));
 
@@ -434,6 +445,36 @@ Context::Context(Context &&other)
       fault_watcher(std::exchange(other.fault_watcher, nullptr)) {
   for (auto &dev : nodes)
     dev.ctx = this;
+  if (fault_watcher) {
+    auto *w = static_cast<FaultWatcher *>(fault_watcher);
+    w->mem_event.ctx = this;
+    w->hw_event.ctx = this;
+    w->wake_event.ctx = this;
+  }
+}
+
+Context &Context::operator=(Context &&other) {
+  if (this != &other) {
+    stop_fault_watcher(fault_watcher);
+    nodes.clear();
+    if (fd >= 0)
+      ::close(fd);
+
+    fd = std::exchange(other.fd, -1);
+    xnack = other.xnack;
+    nodes = std::move(other.nodes);
+    fault_watcher = std::exchange(other.fault_watcher, nullptr);
+
+    for (auto &dev : nodes)
+      dev.ctx = this;
+    if (fault_watcher) {
+      auto *w = static_cast<FaultWatcher *>(fault_watcher);
+      w->mem_event.ctx = this;
+      w->hw_event.ctx = this;
+      w->wake_event.ctx = this;
+    }
+  }
+  return *this;
 }
 
 std::expected<VersionInfo, Error> Context::version() const {
@@ -442,21 +483,17 @@ std::expected<VersionInfo, Error> Context::version() const {
   return VersionInfo{.major = args.major_version, .minor = args.minor_version};
 }
 
-uint64_t *Context::event_slot(uint32_t id) {
-  if (id >= KFD_SIGNAL_EVENT_LIMIT) {
-    std::fprintf(stderr, "assertion failed: event id %u >= limit %u\n", id,
-                 static_cast<unsigned>(KFD_SIGNAL_EVENT_LIMIT));
-    std::abort();
-  }
+std::expected<uint64_t *, Error> Context::event_slot(uint32_t id) {
+  if (id >= KFD_SIGNAL_EVENT_LIMIT)
+    return kfd::unexpected(EINVAL, "event id %u >= limit %u\n", id,
+                           static_cast<unsigned>(KFD_SIGNAL_EVENT_LIMIT));
   return &__atomic_load_n(&event_page, __ATOMIC_ACQUIRE)[id];
 }
 
-uint64_t *Context::fence_slot(uint32_t id) {
-  if (id >= KFD_SIGNAL_EVENT_LIMIT) {
-    std::fprintf(stderr, "assertion failed: fence id %u >= limit %u\n", id,
-                 static_cast<unsigned>(KFD_SIGNAL_EVENT_LIMIT));
-    std::abort();
-  }
+std::expected<uint64_t *, Error> Context::fence_slot(uint32_t id) {
+  if (id >= KFD_SIGNAL_EVENT_LIMIT)
+    return kfd::unexpected(EINVAL, "fence id %u >= limit %u\n", id,
+                           static_cast<unsigned>(KFD_SIGNAL_EVENT_LIMIT));
   return &__atomic_load_n(&fence_page, __ATOMIC_ACQUIRE)[id];
 }
 

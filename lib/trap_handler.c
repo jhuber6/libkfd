@@ -59,7 +59,7 @@ static const unsigned char trap_gfx12_5_generic[] = {
   X(gfx12_5_generic)
 
 #define X_ENTRY(id) {trap_##id, sizeof(trap_##id)},
-const struct trap_handler_image trap_handler_images[] = {
+const struct TrapHandlerImage trap_handler_images[] = {
     TRAP_HANDLER_LIST(X_ENTRY)};
 #undef X_ENTRY
 

@@ -137,11 +137,11 @@ std::expected<MappedRegion, Error> init_scratch(Device &dev, size_t pool_size) {
 }
 
 // We compile a trap handler for every supported target.
-const trap_handler_image *find_trap_image(uint32_t gfx_version) {
+const TrapHandlerImage *find_trap_image(uint32_t gfx_version) {
   uint32_t target = elf::get_mach(gfx_version);
   uint32_t generic = elf::get_generic_for_gpu(gfx_version);
 
-  const trap_handler_image *fallback = nullptr;
+  const TrapHandlerImage *fallback = nullptr;
   for (unsigned i = 0; i < trap_handler_image_count; ++i) {
     if (trap_handler_images[i].size < sizeof(elf::Elf64_Ehdr))
       continue;
@@ -164,7 +164,7 @@ struct TrapHandlerBuffers {
 
 // Load and register the trap handler binary with the device.
 std::expected<TrapHandlerBuffers, Error> setup_trap_handler(Device &dev) {
-  const trap_handler_image *img = find_trap_image(dev.gfx_version());
+  const TrapHandlerImage *img = find_trap_image(dev.gfx_version());
   if (!img)
     return kfd::unexpected(ENOENT, "no trap handler image for device gfx%u%u%x",
                            abi::gfx_version_major(dev.gfx_version()),
@@ -308,6 +308,7 @@ Device::Device(Device &&other)
       trap_tba(std::move(other.trap_tba)), trap_tma(std::move(other.trap_tma)),
       scratch_reservation(std::move(other.scratch_reservation)),
       scratch_allocator(std::move(other.scratch_allocator)) {
+  doorbells.owner = this;
   trap_tba.owner = this;
   trap_tma.owner = this;
 }

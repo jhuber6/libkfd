@@ -26,33 +26,37 @@ std::expected<Event, Error> Event::create(Context &ctx, uint32_t type) {
   };
   KFD_CHECK(ioctl::call<ioctl::kfd::CREATE_EVENT>(ctx.kfd_fd(), args));
 
-  Event ev(ctx.kfd_fd(), args.event_id, args.event_trigger_data,
-           args.event_slot_index,
-           is_signal ? ctx.event_slot(args.event_slot_index) : nullptr);
+  uint64_t *slot = nullptr;
+  if (is_signal)
+    slot = KFD_TRY(ctx.event_slot(args.event_slot_index));
+  Event ev(&ctx, args.event_id, args.event_trigger_data, args.event_slot_index,
+           slot);
   return ev;
 }
 
 Event::~Event() {
-  if (fd < 0)
+  if (!ctx)
     return;
 
   ioctl::kfd::destroy_event_args args{.event_id = id};
-  KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_EVENT>(fd, args));
+  KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_EVENT>(ctx->kfd_fd(), args));
 }
 
+int Event::kfd_fd() const { return ctx->kfd_fd(); }
+
 Event::Event(Event &&other)
-    : fd(std::exchange(other.fd, -1)), id(std::exchange(other.id, 0)),
+    : ctx(std::exchange(other.ctx, nullptr)), id(std::exchange(other.id, 0)),
       trigger(std::exchange(other.trigger, 0)),
       slot_idx(std::exchange(other.slot_idx, 0)),
       slot_addr(std::exchange(other.slot_addr, nullptr)) {}
 
 Event &Event::operator=(Event &&other) {
   if (this != &other) {
-    if (fd >= 0) {
+    if (ctx) {
       ioctl::kfd::destroy_event_args args{.event_id = id};
-      ioctl::call<ioctl::kfd::DESTROY_EVENT>(fd, args);
+      ioctl::call<ioctl::kfd::DESTROY_EVENT>(ctx->kfd_fd(), args);
     }
-    fd = std::exchange(other.fd, -1);
+    ctx = std::exchange(other.ctx, nullptr);
     id = std::exchange(other.id, 0);
     trigger = std::exchange(other.trigger, 0);
     slot_idx = std::exchange(other.slot_idx, 0);
@@ -71,6 +75,7 @@ std::expected<void, Error> Event::wait(uint32_t timeout_ms) {
       .wait_for_all = 1,
       .timeout = timeout_ms,
   };
+  int fd = ctx->kfd_fd();
   if (auto r = ioctl::call<ioctl::kfd::WAIT_EVENTS>(fd, args); !r)
     return r;
   if (args.wait_result == KFD_IOC_WAIT_RESULT_TIMEOUT)
@@ -84,12 +89,12 @@ std::expected<void, Error> Event::wait(uint32_t timeout_ms) {
 
 std::expected<void, Error> Event::reset() {
   ioctl::kfd::reset_event_args args{.event_id = id};
-  return ioctl::call<ioctl::kfd::RESET_EVENT>(fd, args);
+  return ioctl::call<ioctl::kfd::RESET_EVENT>(ctx->kfd_fd(), args);
 }
 
 std::expected<void, Error> Event::signal() {
   ioctl::kfd::set_event_args args{.event_id = id};
-  return ioctl::call<ioctl::kfd::SET_EVENT>(fd, args);
+  return ioctl::call<ioctl::kfd::SET_EVENT>(ctx->kfd_fd(), args);
 }
 
 } // namespace kfd

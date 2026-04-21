@@ -44,7 +44,7 @@ public:
   // GPU-visible address of this event's signal page slot.
   void *signal_addr() const { return slot_addr; }
 
-  int kfd_fd() const { return fd; }
+  int kfd_fd() const;
 
   // Block until receiving the signal or timeout expires.
   std::expected<void, Error> wait(uint32_t timeout_ms = UINT32_MAX);
@@ -55,15 +55,17 @@ public:
   // Signal from the CPU side (via kernel ioctl).
   std::expected<void, Error> signal();
 
-  explicit operator bool() const { return fd >= 0; }
+  explicit operator bool() const { return ctx != nullptr; }
 
 private:
-  Event(int fd, uint32_t id, uint32_t trigger, uint32_t slot_idx,
+  friend class Context;
+
+  Event(Context *ctx, uint32_t id, uint32_t trigger, uint32_t slot_idx,
         void *slot_addr)
-      : fd(fd), id(id), trigger(trigger), slot_idx(slot_idx),
+      : ctx(ctx), id(id), trigger(trigger), slot_idx(slot_idx),
         slot_addr(slot_addr) {}
 
-  int fd = -1;
+  Context *ctx = nullptr;
   uint32_t id = 0;
   uint32_t trigger = 0;
   uint32_t slot_idx = 0;

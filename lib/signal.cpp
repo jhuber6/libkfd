@@ -97,8 +97,9 @@ uint64_t add_sat(uint64_t a, uint64_t b) {
 
 std::expected<Signal, Error> Signal::create(Context &ctx, uint64_t initial) {
   auto ev = KFD_TRY(Event::create(ctx));
+  auto slot = KFD_TRY(ctx.fence_slot(ev.slot_index()));
 
-  Signal sig(std::move(ev), ctx.fence_slot(ev.slot_index()), initial);
+  Signal sig(std::move(ev), slot, initial);
   return sig;
 }
 

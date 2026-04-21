@@ -33,12 +33,10 @@ public:
 
   ~Context();
 
-  // Other classes carry pointer references to this interface so move assignment
-  // is explicitly deleted.
   Context(const Context &) = delete;
   Context &operator=(const Context &) = delete;
   Context(Context &&other);
-  Context &operator=(Context &&) = delete;
+  Context &operator=(Context &&other);
 
   std::expected<VersionInfo, Error> version() const;
 
@@ -55,8 +53,8 @@ private:
   friend class Event;
   friend class Signal;
 
-  uint64_t *event_slot(uint32_t id);
-  uint64_t *fence_slot(uint32_t id);
+  std::expected<uint64_t *, Error> event_slot(uint32_t id);
+  std::expected<uint64_t *, Error> fence_slot(uint32_t id);
 
   void register_queue_error(uint32_t event_id, volatile uint64_t *payload,
                             uint32_t queue_id, uint32_t gpu_id);

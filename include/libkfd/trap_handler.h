@@ -12,12 +12,12 @@
 extern "C" {
 #endif
 
-struct trap_handler_image {
+struct TrapHandlerImage {
   const unsigned char *data;
   unsigned long size;
 };
 
-extern const struct trap_handler_image trap_handler_images[];
+extern const struct TrapHandlerImage trap_handler_images[];
 extern const unsigned trap_handler_image_count;
 
 #ifdef __cplusplus

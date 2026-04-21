@@ -38,6 +38,77 @@ TEST_CASE("Context - device initializes lazily on first access", "[context]") {
   CHECK((*dev)->gpu_id() != 0);
 }
 
+TEST_CASE("Context - move construction preserves state", "[context]") {
+  auto result = kfd::Context::create();
+  if (!result)
+    SKIP("KFD not available: " << kfd::strerror(result.error()));
+
+  int original_fd = result->kfd_fd();
+  size_t original_ndevs = result->num_devices();
+
+  kfd::Context moved(std::move(*result));
+  CHECK(moved.kfd_fd() == original_fd);
+  CHECK(moved.num_devices() == original_ndevs);
+
+  if (moved.num_devices() > 0) {
+    auto dev = moved.device(0);
+    REQUIRE_RESULT(dev);
+    CHECK(&(*dev)->context() == &moved);
+  }
+}
+
+TEST_CASE("Context - move assignment preserves state", "[context]") {
+  auto first = kfd::Context::create();
+  if (!first)
+    SKIP("KFD not available: " << kfd::strerror(first.error()));
+
+  auto second = kfd::Context::create();
+  if (!second)
+    SKIP("Second context failed: " << kfd::strerror(second.error()));
+
+  int second_fd = second->kfd_fd();
+  size_t second_ndevs = second->num_devices();
+
+  *first = std::move(*second);
+  CHECK(first->kfd_fd() == second_fd);
+  CHECK(first->num_devices() == second_ndevs);
+
+  if (first->num_devices() > 0) {
+    auto dev = first->device(0);
+    REQUIRE_RESULT(dev);
+    CHECK(&(*dev)->context() == &*first);
+  }
+}
+
+TEST_CASE("Context - multiple contexts coexist", "[context]") {
+  auto a = kfd::Context::create();
+  if (!a)
+    SKIP("KFD not available: " << kfd::strerror(a.error()));
+
+  auto b = kfd::Context::create();
+  REQUIRE_RESULT(b);
+
+  CHECK(a->kfd_fd() != b->kfd_fd());
+  CHECK(a->num_devices() == b->num_devices());
+
+  if (a->num_devices() > 0) {
+    auto dev_a = a->device(0);
+    auto dev_b = b->device(0);
+    REQUIRE_RESULT(dev_a);
+    REQUIRE_RESULT(dev_b);
+    CHECK(&(*dev_a)->context() == &*a);
+    CHECK(&(*dev_b)->context() == &*b);
+    CHECK((*dev_a)->gpu_id() == (*dev_b)->gpu_id());
+
+    auto ver_a = a->version();
+    auto ver_b = b->version();
+    REQUIRE_RESULT(ver_a);
+    REQUIRE_RESULT(ver_b);
+    CHECK(ver_a->major == ver_b->major);
+    CHECK(ver_a->minor == ver_b->minor);
+  }
+}
+
 TEST_CASE("Context - node properties have reasonable values", "[context]") {
   auto ctx = kfd::Context::create();
   if (!ctx)
