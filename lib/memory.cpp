@@ -190,8 +190,8 @@ std::expected<void, Error> Buffer::map(std::span<Device *const> targets) {
   return {};
 }
 
-std::expected<void, Error> Buffer::map(Device &dev) {
-  Device *local = &dev;
+std::expected<void, Error> Buffer::map(Device &device) {
+  Device *local = &device;
   return map(std::span<Device *const>(&local, 1));
 }
 

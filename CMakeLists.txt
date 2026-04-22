@@ -7,9 +7,9 @@ foreach(lang C CXX)
       "This project requires Clang as the ${lang} compiler, "
       "found ${CMAKE_${lang}_COMPILER_ID}")
   endif()
-  if(CMAKE_${lang}_COMPILER_VERSION VERSION_LESS "20.0")
+  if(CMAKE_${lang}_COMPILER_VERSION VERSION_LESS "21.0")
     message(FATAL_ERROR
-      "Clang >= 20 is required for ${lang}, "
+      "Clang >= 21 is required for ${lang}, "
       "found ${CMAKE_${lang}_COMPILER_VERSION}")
   endif()
 endforeach()

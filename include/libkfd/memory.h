@@ -89,7 +89,7 @@ public:
 
   // Map this buffer to the device's page tables. Must be done before accessing.
   std::expected<void, Error> map(std::span<Device *const> targets);
-  std::expected<void, Error> map(Device &dev);
+  std::expected<void, Error> map(Device &device);
 
   // Unmap from one or more GPUs.
   std::expected<void, Error> unmap(std::span<Device *const> targets);

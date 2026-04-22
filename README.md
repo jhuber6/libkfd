@@ -43,6 +43,7 @@ depend on any C++ runtime features. The library handles:
 - **CMake >= 3.28**
 - **Ninja** (recommended) or Make
 - **libdrm** with amdgpu support (`libdrm_amdgpu` via pkg-config)
+- **xcb**, **xcb-dri3**, **xcb-present** (optional, for the `computetoy` tool)
 - **Linux kernel >= 6.7 with KFD enabled** (typically `CONFIG_HSA_AMD=y`)
 - An AMDGPU -- GFX9 (Vega), GFX10 (RDNA 1/2), GFX11 (RDNA 3), or GFX12
   (RDNA 4)
@@ -175,6 +176,7 @@ headers](https://libc.llvm.org/gpu/building.html).
 | **kfdinfo** | Prints a detailed summary of the GPU topology - identity, compute layout, memory, caches, IO links, and firmware versions. |
 | **sandbox** | Runs a SAXPY kernel end-to-end as a minimal libkfd demo. |
 | **gpu-loader** | An `llvm-gpu-loader` equivalent that launches a `main()` function on the GPU as a hosted environment. |
+| **computetoy** | Runs a compute kernel as a procedural image synthesizer and presents it to an X11 window via DRI3. Requires `xcb`, `xcb-dri3`, and `xcb-present`. |
 
 ## Project Structure
 
