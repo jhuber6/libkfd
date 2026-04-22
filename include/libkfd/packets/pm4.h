@@ -591,13 +591,19 @@ inline uint32_t wait_reg_mem(uint32_t *out, uint32_t gfx_version, void *addr,
 
 // Atomic operations (TC_OP / GL2_OP values).
 //
-// Non-RTN variants (0x40+) do not return the old value to the CP. RTN variants
-// return the old value for consumption by COPY_DATA. This is a subset, other
-// atomics silently drop when accessing uncached system memory and are thus
-// unusable in practice.
+// RTN variants (0x00-0x3F) return the old value to the CP for consumption by
+// COPY_DATA. Non-RTN variants (0x40+) do not return the old value. Prefer RTN
+// variants with WAIT_CONFIRM for fence writes, some GFX9 hardware silently
+// drops non-RTN atomics targeting uncached system memory.
 //
 // References: TC_OP enum in pm4_cmds.h; GL2_OP in navi10_enum.h
 enum AtomicOp : uint32_t {
+  ATOMIC_SWAP_RTN_32 = 0x07,
+  ATOMIC_CMPSWAP_RTN_32 = 0x08,
+  ATOMIC_ADD_RTN_32 = 0x0F,
+  ATOMIC_SWAP_RTN_64 = 0x27,
+  ATOMIC_CMPSWAP_RTN_64 = 0x28,
+  ATOMIC_ADD_RTN_64 = 0x2F,
   ATOMIC_SWAP_32 = 0x47,
   ATOMIC_CMPSWAP_32 = 0x48,
   ATOMIC_ADD_32 = 0x4F,

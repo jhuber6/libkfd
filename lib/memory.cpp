@@ -125,7 +125,8 @@ std::expected<Buffer, Error> Buffer::allocate(Device &dev, size_t size,
                 std::move(mtx));
 }
 
-std::expected<Buffer, Error> Buffer::pin(Device &dev, void *ptr, size_t size) {
+std::expected<Buffer, Error> Buffer::pin(Device &dev, void *ptr, size_t size,
+                                         MemFlags flags) {
   Context &ctx = dev.context();
   size = align_up(size, page_size());
   uintptr_t va_addr = reinterpret_cast<uintptr_t>(ptr);
@@ -136,8 +137,7 @@ std::expected<Buffer, Error> Buffer::pin(Device &dev, void *ptr, size_t size) {
       .mmap_offset = va_addr,
       .gpu_id = dev.gpu_id(),
       .flags = static_cast<uint32_t>(KFD_IOC_ALLOC_MEM_FLAGS_USERPTR) |
-               static_cast<uint32_t>(KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE) |
-               static_cast<uint32_t>(KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE),
+               static_cast<uint32_t>(flags),
   };
 
   KFD_CHECK(

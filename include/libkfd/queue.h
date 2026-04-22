@@ -87,7 +87,8 @@ private:
   QueueBase() = default;
   QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
             Buffer control, Buffer ring, Buffer eop, detail::MappedRegion cwsr,
-            volatile uint64_t *doorbell, detail::Box<Event> err_event,
+            Buffer cwsr_bo, volatile uint64_t *doorbell,
+            detail::Box<Event> err_event,
             detail::Box<detail::Mutex> submit_mtx);
 
   std::expected<void, Error> submit(const uint32_t *data, size_t dwords);
@@ -109,6 +110,7 @@ private:
   Buffer ring;
   Buffer eop;
   detail::MappedRegion cwsr;
+  Buffer cwsr_bo;
 
   volatile uint64_t *doorbell = nullptr;
   detail::Box<Event> err_event;
@@ -180,7 +182,19 @@ public:
   // has finished.
   std::expected<void, Error> signal(Signal &sig) {
     uint32_t buf[SIGNAL_DWORDS];
-    uint32_t n = build_signal_packet(buf, sig);
+    // We use a RELEASE_MEM packet with the sequence counter and cache-bypass to
+    // wait until the necessary work and cache invalidation has completed. Then
+    // we decrement the signal value and fire an event.
+    uint32_t seq = __atomic_fetch_add(&next_eop_seq, 1, __ATOMIC_RELAXED) + 1;
+    uint32_t n = 0;
+    n += pm4::release_mem(buf + n, base.dev->gfx_version(), eop_seq.data(),
+                          static_cast<uint64_t>(seq));
+    n += pm4::wait_reg_mem(buf + n, base.dev->gfx_version(), eop_seq.data(),
+                           Condition::GTE, seq);
+    n += pm4::atomic_mem(buf + n, pm4::ATOMIC_ADD_RTN_64, sig.fence_addr(),
+                         int64_t(-1), 0, pm4::ATOMIC_WAIT_CONFIRM);
+    n += pm4::release_mem(buf + n, base.dev->gfx_version(), sig.signal_addr(),
+                          sig.event_id(), sig.trigger_data());
     return base.submit(buf, n);
   }
 
@@ -260,8 +274,6 @@ private:
 
   explicit ComputeQueue(QueueBase &&b, Buffer &&vram)
       : eop_seq(std::move(vram)), base(std::move(b)) {}
-
-  uint32_t build_signal_packet(uint32_t *buf, Signal &sig);
 
   Buffer eop_seq;
   QueueBase base;

@@ -101,6 +101,7 @@ struct NodeProperties {
 
   // Constant capability bits in the node properties.
   static constexpr uint32_t NODE_CAP_SRAM_EDCSUPPORTED = 0x04000000;
+  static constexpr uint32_t NODE_CAP_SVMAPI_SUPPORTED = 0x08000000;
 };
 
 struct MemoryBank {

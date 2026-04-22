@@ -315,6 +315,7 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
   // The header wires up err_payload_addr and err_event_id so KFD can
   // signal queue exceptions (traps, illegal instructions, etc.).
   MappedRegion cwsr_buf;
+  Buffer cwsr_bo_buf;
   detail::Box<Event> err_ev;
   const NodeProperties &props = dev.properties();
   if (is_compute && props.cwsr_size > 0) {
@@ -337,28 +338,42 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
         align_up(static_cast<size_t>(props.cwsr_size + debug_mem) * num_xcc,
                  page_size());
 
-    auto cwsr_region = KFD_TRY(MappedRegion::create(total_cwsr));
-    std::memset(cwsr_region.data(), 0, cwsr_region.size());
-
     // Each queue has an event for the CWSR to handle device-side interrupts.
     auto raw_ev = KFD_TRY(Event::create(ctx));
     err_ev = KFD_TRY(detail::Box<Event>::create(std::move(raw_ev)));
 
+    void *cwsr_data = nullptr;
+    bool svm_supported =
+        (props.capability & NodeProperties::NODE_CAP_SVMAPI_SUPPORTED) != 0;
+
+    // CWSR can fire at any time so we must ensure that the pages are resident.
+    // If SVM is supported we use an always-mapped page, otherwise we pin
+    // anonymous pages as a USERPTR BO (matching libhsakmt's dGPU fallback).
+    auto cwsr_region = KFD_TRY(MappedRegion::create(total_cwsr));
+    std::memset(cwsr_region.data(), 0, cwsr_region.size());
+    if (svm_supported) {
+      KFD_CHECK(register_svm(ctx.kfd_fd(), cwsr_region.data(),
+                             cwsr_region.size(), dev.gpu_id()));
+    } else {
+      constexpr MemFlags CWSR_PIN_FLAGS =
+          MemFlags::WRITABLE | MemFlags::EXECUTABLE | MemFlags::COHERENT;
+      auto bo = KFD_TRY(
+          Buffer::pin(dev, cwsr_region.data(), total_cwsr, CWSR_PIN_FLAGS));
+      KFD_CHECK(bo.map(dev));
+      cwsr_bo_buf = std::move(bo);
+    }
+    cwsr_data = cwsr_region.data();
+    cwsr_buf = std::move(cwsr_region);
+
     for (uint32_t i = 0; i < num_xcc; ++i) {
       auto *hdr = reinterpret_cast<abi::CwsrHeader *>(
-          static_cast<char *>(cwsr_region.data()) +
+          static_cast<char *>(cwsr_data) +
           static_cast<size_t>(i * props.cwsr_size));
       hdr->debug_offset = (num_xcc - i) * props.cwsr_size;
       hdr->debug_size = debug_mem * num_xcc;
       hdr->err_payload_addr = reinterpret_cast<uint64_t>(&ctl->err_payload);
       hdr->err_event_id = err_ev->event_id();
     }
-
-    // CWSR can fire at any time so we must ensure that the pages are resident.
-    KFD_CHECK(register_svm(ctx.kfd_fd(), cwsr_region.data(), cwsr_region.size(),
-                           dev.gpu_id()));
-
-    cwsr_buf = std::move(cwsr_region);
   }
 
   // The ring buffer itself that holds the packets.
@@ -392,9 +407,9 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
     args.eop_buffer_address = reinterpret_cast<uintptr_t>(eop_buf.data());
     args.eop_buffer_size = EOP_BUFFER_SIZE;
   }
-  if (cwsr_buf) {
-    args.ctx_save_restore_address =
-        reinterpret_cast<uintptr_t>(cwsr_buf.data());
+  if (cwsr_buf || cwsr_bo_buf) {
+    void *cwsr_ptr = cwsr_buf ? cwsr_buf.data() : cwsr_bo_buf.data();
+    args.ctx_save_restore_address = reinterpret_cast<uintptr_t>(cwsr_ptr);
     args.ctx_save_restore_size = props.cwsr_size;
     args.ctl_stack_size = props.ctl_stack_size;
   }
@@ -424,7 +439,8 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
   auto mtx = KFD_TRY(detail::Box<detail::Mutex>::create());
   QueueBase q(type, ctx, dev, args.queue_id, std::move(ctl_buf),
               std::move(ring_buf), std::move(eop_buf), std::move(cwsr_buf),
-              *db_slot, std::move(err_ev), std::move(mtx));
+              std::move(cwsr_bo_buf), *db_slot, std::move(err_ev),
+              std::move(mtx));
 
   if (q.err_event) {
     q.err_watch_ctx = KFD_TRY(detail::Box<QueueErrorCtx>::create(
@@ -452,13 +468,13 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
 
 QueueBase::QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
                      Buffer control, Buffer ring, Buffer eop,
-                     detail::MappedRegion cwsr, volatile uint64_t *doorbell,
-                     detail::Box<Event> err_event,
+                     detail::MappedRegion cwsr, Buffer cwsr_bo,
+                     volatile uint64_t *doorbell, detail::Box<Event> err_event,
                      detail::Box<detail::Mutex> submit_mtx)
     : type(type), ctx(&ctx), dev(&dev), id(id), control(std::move(control)),
       ring(std::move(ring)), eop(std::move(eop)), cwsr(std::move(cwsr)),
-      doorbell(doorbell), err_event(std::move(err_event)),
-      submit_mtx(std::move(submit_mtx)) {}
+      cwsr_bo(std::move(cwsr_bo)), doorbell(doorbell),
+      err_event(std::move(err_event)), submit_mtx(std::move(submit_mtx)) {}
 
 QueueBase::~QueueBase() {
   if (!ctx)
@@ -488,6 +504,7 @@ QueueBase::QueueBase(QueueBase &&other)
       dev(std::exchange(other.dev, nullptr)), id(std::exchange(other.id, 0)),
       control(std::move(other.control)), ring(std::move(other.ring)),
       eop(std::move(other.eop)), cwsr(std::move(other.cwsr)),
+      cwsr_bo(std::move(other.cwsr_bo)),
       doorbell(std::exchange(other.doorbell, nullptr)),
       err_event(std::move(other.err_event)),
       err_watch_ctx(std::move(other.err_watch_ctx)),
@@ -523,6 +540,7 @@ QueueBase &QueueBase::operator=(QueueBase &&other) {
   control = std::move(other.control);
   eop = std::move(other.eop);
   cwsr = std::move(other.cwsr);
+  cwsr_bo = std::move(other.cwsr_bo);
   doorbell = std::exchange(other.doorbell, nullptr);
   err_event = std::move(other.err_event);
   err_watch_ctx = std::move(other.err_watch_ctx);
@@ -744,23 +762,6 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
       pm4::dispatch_initiator(kd, base.dev->gfx_version()));
 
   return base.submit_impl(buf, n);
-}
-
-uint32_t ComputeQueue::build_signal_packet(uint32_t *buf, Signal &sig) {
-  // We use a RELEASE_MEM packet with the sequence counter and cache-bypass to
-  // wait until the necessary work and cache invalidation has completed. Then
-  // we decrement the signal value and fire an event.
-  uint32_t seq = __atomic_fetch_add(&next_eop_seq, 1, __ATOMIC_RELAXED) + 1;
-  uint32_t n = 0;
-  n += pm4::release_mem(buf + n, base.dev->gfx_version(), eop_seq.data(),
-                        static_cast<uint64_t>(seq));
-  n += pm4::wait_reg_mem(buf + n, base.dev->gfx_version(), eop_seq.data(),
-                         Condition::GTE, seq);
-  n += pm4::atomic_mem(buf + n, pm4::ATOMIC_ADD_64, sig.fence_addr(),
-                       int64_t(-1), 0, pm4::ATOMIC_WAIT_CONFIRM);
-  n += pm4::release_mem(buf + n, base.dev->gfx_version(), sig.signal_addr(),
-                        sig.event_id(), sig.trigger_data());
-  return n;
 }
 
 // SDMA queues execute packets in-order to copy between PCI-e or XGMI.

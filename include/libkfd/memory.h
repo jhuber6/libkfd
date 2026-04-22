@@ -83,7 +83,9 @@ public:
            MemFlags flags = MemFlags::WRITABLE, void *addr = nullptr);
 
   // Pin an existing host memory region for device access.
-  static std::expected<Buffer, Error> pin(Device &dev, void *ptr, size_t size);
+  static std::expected<Buffer, Error>
+  pin(Device &dev, void *ptr, size_t size,
+      MemFlags flags = MemFlags::WRITABLE | MemFlags::EXECUTABLE);
 
   // Map this buffer to the device's page tables. Must be done before accessing.
   std::expected<void, Error> map(std::span<Device *const> targets);
