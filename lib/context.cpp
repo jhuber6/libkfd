@@ -176,7 +176,7 @@ int fault_watcher_entry(void *arg) {
       auto &d = eds[1].hw_exception_data;
       std::fprintf(stderr,
                    "GPU HW exception (gpu_id %u): reset_type=%u "
-                   "reset_cause=%u memory_lost=%u\n",
+                   "reset_cause=%u memory_lost=%u",
                    d.gpu_id, d.reset_type, d.reset_cause, d.memory_lost);
       ::raise(SIGABRT);
     }
@@ -425,14 +425,14 @@ std::expected<VersionInfo, Error> Context::version() const {
 
 std::expected<uint64_t *, Error> Context::event_slot(uint32_t id) {
   if (id >= KFD_SIGNAL_EVENT_LIMIT)
-    return kfd::unexpected(EINVAL, "event id %u >= limit %u\n", id,
+    return kfd::unexpected(EINVAL, "event id %u >= limit %u", id,
                            static_cast<unsigned>(KFD_SIGNAL_EVENT_LIMIT));
   return &__atomic_load_n(&event_page, __ATOMIC_ACQUIRE)[id];
 }
 
 std::expected<uint64_t *, Error> Context::fence_slot(uint32_t id) {
   if (id >= KFD_SIGNAL_EVENT_LIMIT)
-    return kfd::unexpected(EINVAL, "fence id %u >= limit %u\n", id,
+    return kfd::unexpected(EINVAL, "fence id %u >= limit %u", id,
                            static_cast<unsigned>(KFD_SIGNAL_EVENT_LIMIT));
   return &__atomic_load_n(&fence_page, __ATOMIC_ACQUIRE)[id];
 }

@@ -100,6 +100,15 @@ public:
     --count;
   }
 
+  void pop_front() {
+    ptr[0].~T();
+    for (size_t i = 1; i < count; ++i) {
+      ::new (ptr + i - 1) T(std::move(ptr[i]));
+      ptr[i].~T();
+    }
+    --count;
+  }
+
   [[nodiscard]] std::expected<void, Error> reserve(size_t n) {
     if (n <= cap)
       return {};

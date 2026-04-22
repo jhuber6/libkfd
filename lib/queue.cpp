@@ -9,6 +9,7 @@
 #include "ioctl.h"
 #include "libkfd/context.h"
 #include "libkfd/detail/scratch.h"
+#include "libkfd/detail/small_vector.h"
 #include "libkfd/detail/utility.h"
 
 #include <bit>
@@ -34,6 +35,32 @@ struct QueueErrorCtx {
   uint64_t *err_payload;
   uint32_t queue_id;
   uint32_t gpu_id;
+};
+
+struct ScratchRequest {
+  uint32_t needed_per_thread;
+  Dim3 block;
+  uint16_t kernel_code_properties;
+};
+
+struct ScratchCtx {
+  Device *dev = nullptr;
+
+  uint32_t *scratch_done_ptr = nullptr;
+  uint64_t *scratch_ready_ptr = nullptr;
+  uint32_t *ib_buf = nullptr;
+
+  void *scratch_va = nullptr;
+  size_t scratch_size = 0;
+  Buffer scratch_bo;
+  uint32_t scratch_tmpring = 0;
+  uint32_t scratch_per_thread = 0;
+
+  detail::Mutex mtx;
+  detail::SmallVector<ScratchRequest, 8> requests;
+
+  uint32_t seq = 0;
+  int error = 0;
 };
 
 namespace {
@@ -75,6 +102,36 @@ std::expected<void, Error> register_svm(int kfd_fd, void *addr, size_t size,
   return ioctl::call<ioctl::kfd::SVM>(kfd_fd, *args, ATTR_BYTES);
 }
 
+// Set the scratch registers in the indirect buffer. This overrides what was
+// written in the standard packet with what the watcher thread allocated.
+uint32_t set_scratch_sgprs(uint32_t *out, uint32_t gfx_version,
+                           const void *scratch_base, uint32_t tmpring_size,
+                           uint16_t props) {
+  uint32_t n = 0;
+  if (props & abi::ENABLE_SGPR_PRIVATE_SEGMENT_BUFFER) {
+    uint32_t v[4];
+    pm4::build_scratch_srd(v, gfx_version, scratch_base, tmpring_size, props);
+    n += pm4::set_sh_reg(out + n, pm4::regs::COMPUTE_USER_DATA_0, v, 4);
+  }
+  if (props & abi::ENABLE_SGPR_FLAT_SCRATCH_INIT) {
+    uint32_t pos = 0;
+    if (props & abi::ENABLE_SGPR_PRIVATE_SEGMENT_BUFFER)
+      pos += 4;
+    if (props & abi::ENABLE_SGPR_DISPATCH_PTR)
+      pos += 2;
+    if (props & abi::ENABLE_SGPR_QUEUE_PTR)
+      pos += 2;
+    if (props & abi::ENABLE_SGPR_KERNARG_SEGMENT_PTR)
+      pos += 2;
+    if (props & abi::ENABLE_SGPR_DISPATCH_ID)
+      pos += 2;
+    const uint32_t flat[] = {lo(scratch_base), hi(scratch_base)};
+    n +=
+        pm4::set_sh_reg(out + n, pm4::regs::COMPUTE_USER_DATA_0 + pos, flat, 2);
+  }
+  return n;
+}
+
 void report_queue_exception(uint32_t queue_id, uint32_t gpu_id, uint64_t code) {
   std::fprintf(stderr, "GPU queue exception (queue %u, gpu_id %u): code 0x%lx",
                queue_id, gpu_id, static_cast<unsigned long>(code));
@@ -103,6 +160,134 @@ void QueueBase::queue_error_handler(Event &, void *user_data) {
     __atomic_store_n(ectx->err_payload, 0, __ATOMIC_RELEASE);
     ::raise(SIGABRT);
   }
+}
+
+// The GPU stalls for each pending scratch allocation. This function will be
+// called once for every scratch request made.
+void QueueBase::scratch_handler(Event &, void *user_data) {
+  auto *sctx = static_cast<ScratchCtx *>(user_data);
+  uint32_t ready = static_cast<uint32_t>(
+      __atomic_load_n(sctx->scratch_ready_ptr, __ATOMIC_ACQUIRE));
+  uint32_t done = __atomic_load_n(sctx->scratch_done_ptr, __ATOMIC_RELAXED);
+
+  uint32_t next_seq = done + 1;
+  if (next_seq > ready)
+    return;
+
+  // Fetch the scratch size and parameters the packet is requesting.
+  ScratchRequest req;
+  {
+    detail::LockGuard guard(sctx->mtx);
+    if (sctx->requests.empty())
+      return;
+    req = sctx->requests.front();
+    sctx->requests.pop_front();
+  }
+
+  // Reallocate if the request exceeds the current scratch size.
+  if (req.needed_per_thread >
+      __atomic_load_n(&sctx->scratch_per_thread, __ATOMIC_RELAXED)) {
+    void *old_va = __atomic_load_n(&sctx->scratch_va, __ATOMIC_RELAXED);
+    if (old_va) {
+      sctx->scratch_bo.release_device();
+      sctx->scratch_bo = {};
+      KFD_ASSERT(
+          sctx->dev->scratch_allocator.deallocate(old_va, sctx->scratch_size));
+      __atomic_store_n(&sctx->scratch_va, (void *)nullptr, __ATOMIC_RELAXED);
+      sctx->scratch_size = 0;
+      __atomic_store_n(&sctx->scratch_tmpring, 0u, __ATOMIC_RELAXED);
+      __atomic_store_n(&sctx->scratch_per_thread, 0u, __ATOMIC_RELAXED);
+    }
+
+    // Fetch the number of slots that will be allocating the per-thread scratch.
+    uint32_t gfx = sctx->dev->gfx_version();
+    Dim3 block = req.block;
+    uint32_t slots = detail::scratch_device_slots(*sctx->dev);
+    uint32_t num_se = detail::scratch_num_se(*sctx->dev);
+    uint32_t waves_per_group =
+        detail::max(static_cast<uint32_t>(
+                        (static_cast<uint64_t>(block.x) * block.y * block.z +
+                         detail::SCRATCH_LANES_PER_WAVE - 1) /
+                        detail::SCRATCH_LANES_PER_WAVE),
+                    1u);
+    uint32_t min_slots = 2 * num_se;
+    bool allocated = false;
+
+    // Repeatedly try to allocate scratch for the requested number of slots. If
+    // there is insufficient storage we resize the slots and try again.
+    while (slots >= min_slots) {
+      size_t alloc_size =
+          detail::scratch_alloc_size(gfx, req.needed_per_thread, slots);
+      if (alloc_size == 0)
+        break;
+
+      auto region = sctx->dev->scratch_allocator.allocate(alloc_size);
+      if (!region) {
+        slots -= waves_per_group;
+        slots = (slots / num_se) * num_se;
+        continue;
+      }
+
+      auto bo = Buffer::allocate(*sctx->dev, alloc_size, MemType::VRAM,
+                                 MemFlags::WRITABLE, *region);
+      if (!bo) {
+        KFD_ASSERT(
+            sctx->dev->scratch_allocator.deallocate(*region, alloc_size));
+        slots -= waves_per_group;
+        slots = (slots / num_se) * num_se;
+        continue;
+      }
+
+      if (auto r = bo->map(*sctx->dev); !r) {
+        bo->release_device();
+        *bo = {};
+        KFD_ASSERT(
+            sctx->dev->scratch_allocator.deallocate(*region, alloc_size));
+        slots -= waves_per_group;
+        slots = (slots / num_se) * num_se;
+        continue;
+      }
+
+      __atomic_store_n(&sctx->scratch_va, *region, __ATOMIC_RELAXED);
+      sctx->scratch_size = alloc_size;
+      __atomic_store_n(&sctx->scratch_tmpring,
+                       detail::compute_tmpring_size(
+                           *sctx->dev, req.needed_per_thread, alloc_size),
+                       __ATOMIC_RELAXED);
+      __atomic_store_n(&sctx->scratch_per_thread, req.needed_per_thread,
+                       __ATOMIC_RELAXED);
+      sctx->scratch_bo = std::move(*bo);
+      allocated = true;
+      break;
+    }
+
+    if (!allocated) {
+      sctx->ib_buf[0] = pm4::header(
+          pm4::NOP,
+          static_cast<uint16_t>(QueueBase::MAX_SCRATCH_IB_DWORDS - 2));
+      __atomic_store_n(&sctx->error, ENOMEM, __ATOMIC_RELAXED);
+      __atomic_store_n(sctx->scratch_done_ptr, next_seq, __ATOMIC_RELEASE);
+      return;
+    }
+  }
+
+  // Build the indirect buffer with the current scratch state. The GPU
+  // executes this via INDIRECT_BUFFER after its WAIT_REG_MEM clears.
+  void *ib_va = __atomic_load_n(&sctx->scratch_va, __ATOMIC_RELAXED);
+  uint32_t ib_tmpring =
+      __atomic_load_n(&sctx->scratch_tmpring, __ATOMIC_RELAXED);
+  uint32_t gfx = sctx->dev->gfx_version();
+  uint32_t ib_n = 0;
+  ib_n += pm4::set_scratch_base(sctx->ib_buf + ib_n, gfx, ib_va, ib_tmpring);
+  ib_n += set_scratch_sgprs(sctx->ib_buf + ib_n, gfx, ib_va, ib_tmpring,
+                            req.kernel_code_properties);
+  if (ib_n + 2 <= QueueBase::MAX_SCRATCH_IB_DWORDS) {
+    uint32_t pad = QueueBase::MAX_SCRATCH_IB_DWORDS - ib_n;
+    sctx->ib_buf[ib_n] = pm4::header(pm4::NOP, static_cast<uint16_t>(pad - 2));
+  }
+
+  // We are done, fire the signal to unblock the WAIT_REG_MEM stalling the CP.
+  __atomic_store_n(sctx->scratch_done_ptr, next_seq, __ATOMIC_RELEASE);
 }
 
 // Create a queue to communicate with the device's command processor. Each queue
@@ -249,6 +434,19 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
                               q.err_watch_ctx.get()));
   }
 
+  if (is_compute) {
+    auto raw_ev = KFD_TRY(Event::create(ctx));
+    q.scratch_event = KFD_TRY(detail::Box<Event>::create(std::move(raw_ev)));
+
+    q.scratch_watch_ctx = KFD_TRY(detail::Box<ScratchCtx>::create());
+    auto *sctx = q.scratch_watch_ctx.get();
+    sctx->dev = &dev;
+    sctx->scratch_done_ptr = &ctl->scratch_done;
+    sctx->scratch_ready_ptr = &ctl->scratch_ready;
+    sctx->ib_buf = reinterpret_cast<uint32_t *>(ctl->indirect);
+    KFD_CHECK(ctx.watch_event(*q.scratch_event, scratch_handler, sctx));
+  }
+
   return q;
 }
 
@@ -265,14 +463,23 @@ QueueBase::QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
 QueueBase::~QueueBase() {
   if (!ctx)
     return;
+
   if (err_event)
     KFD_ASSERT(ctx->unwatch_event(*err_event));
+  if (scratch_event)
+    KFD_ASSERT(ctx->unwatch_event(*scratch_event));
+
+  // Destroy the queue before releasing scratch. DESTROY_QUEUE preempts any
+  // in-flight waves, so the scratch region is no longer referenced by the GPU
+  // once this returns.
   ioctl::kfd::destroy_queue_args args{.queue_id = id};
   KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_QUEUE>(ctx->kfd_fd(), args));
-  if (scratch_va) {
-    scratch_bo.release_device();
-    scratch_bo = {};
-    KFD_ASSERT(dev->scratch_allocator.deallocate(scratch_va, scratch_size));
+
+  if (scratch_watch_ctx && scratch_watch_ctx->scratch_va) {
+    scratch_watch_ctx->scratch_bo.release_device();
+    scratch_watch_ctx->scratch_bo = {};
+    KFD_ASSERT(dev->scratch_allocator.deallocate(
+        scratch_watch_ctx->scratch_va, scratch_watch_ctx->scratch_size));
   }
 }
 
@@ -284,11 +491,10 @@ QueueBase::QueueBase(QueueBase &&other)
       doorbell(std::exchange(other.doorbell, nullptr)),
       err_event(std::move(other.err_event)),
       err_watch_ctx(std::move(other.err_watch_ctx)),
+      scratch_event(std::move(other.scratch_event)),
+      scratch_watch_ctx(std::move(other.scratch_watch_ctx)),
       submit_mtx(std::move(other.submit_mtx)),
-      pending_wptr(std::exchange(other.pending_wptr, 0)),
-      scratch_bo(std::move(other.scratch_bo)),
-      scratch_va(std::exchange(other.scratch_va, nullptr)),
-      scratch_size(std::exchange(other.scratch_size, 0)) {}
+      pending_wptr(std::exchange(other.pending_wptr, 0)) {}
 
 QueueBase &QueueBase::operator=(QueueBase &&other) {
   if (this == &other)
@@ -297,12 +503,15 @@ QueueBase &QueueBase::operator=(QueueBase &&other) {
   if (ctx) {
     if (err_event)
       KFD_ASSERT(ctx->unwatch_event(*err_event));
+    if (scratch_event)
+      KFD_ASSERT(ctx->unwatch_event(*scratch_event));
     ioctl::kfd::destroy_queue_args dq{.queue_id = id};
     KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_QUEUE>(ctx->kfd_fd(), dq));
-    if (scratch_va) {
-      scratch_bo.release_device();
-      scratch_bo = {};
-      KFD_ASSERT(dev->scratch_allocator.deallocate(scratch_va, scratch_size));
+    if (scratch_watch_ctx && scratch_watch_ctx->scratch_va) {
+      scratch_watch_ctx->scratch_bo.release_device();
+      scratch_watch_ctx->scratch_bo = {};
+      KFD_ASSERT(dev->scratch_allocator.deallocate(
+          scratch_watch_ctx->scratch_va, scratch_watch_ctx->scratch_size));
     }
   }
 
@@ -317,11 +526,10 @@ QueueBase &QueueBase::operator=(QueueBase &&other) {
   doorbell = std::exchange(other.doorbell, nullptr);
   err_event = std::move(other.err_event);
   err_watch_ctx = std::move(other.err_watch_ctx);
+  scratch_event = std::move(other.scratch_event);
+  scratch_watch_ctx = std::move(other.scratch_watch_ctx);
   submit_mtx = std::move(other.submit_mtx);
   pending_wptr = std::exchange(other.pending_wptr, 0);
-  scratch_bo = std::move(other.scratch_bo);
-  scratch_va = std::exchange(other.scratch_va, nullptr);
-  scratch_size = std::exchange(other.scratch_size, 0);
   return *this;
 }
 
@@ -436,50 +644,14 @@ std::expected<ComputeQueue, Error> ComputeQueue::create(Device &dev,
   auto *eop_u32 = static_cast<uint32_t *>(q.eop_seq.data());
   pm4::write_data(init, eop_u32, 0);
   pm4::write_data(init + pm4::WRITE_DATA_DWORDS, eop_u32 + 1, 0);
-  KFD_CHECK(q.base.submit_impl(init, 2 * pm4::WRITE_DATA_DWORDS));
+  KFD_CHECK(q.base.submit_impl(
+      init, static_cast<size_t>(2 * pm4::WRITE_DATA_DWORDS)));
   return q;
 }
 
-std::expected<void, Error>
-ComputeQueue::release_scratch_region(void *va, size_t size, Buffer *bo) {
-  if (bo) {
-    bo->release_device();
-    *bo = {};
-  }
-  return base.dev->scratch_allocator.deallocate(va, size);
-}
-
-std::expected<void, Error> ComputeQueue::try_scratch_alloc(uint32_t per_thread,
-                                                           uint32_t slots) {
-  size_t alloc_size =
-      detail::scratch_alloc_size(base.dev->gfx_version(), per_thread, slots);
-  if (alloc_size == 0)
-    return {};
-
-  auto region = KFD_TRY(base.dev->scratch_allocator.allocate(alloc_size));
-
-  auto bo = Buffer::allocate(*base.dev, alloc_size, MemType::VRAM,
-                             MemFlags::WRITABLE, region);
-  if (!bo) {
-    KFD_ASSERT(release_scratch_region(region, alloc_size));
-    return kfd::unexpected(bo.error());
-  }
-  if (auto r = bo->map(*base.dev); !r) {
-    KFD_ASSERT(release_scratch_region(region, alloc_size, &*bo));
-    return kfd::unexpected(r.error());
-  }
-
-  base.scratch_va = region;
-  base.scratch_size = alloc_size;
-  scratch_tmpring =
-      detail::compute_tmpring_size(*base.dev, per_thread, alloc_size);
-  scratch_per_thread = per_thread;
-  scratch_region_size = alloc_size;
-  base.scratch_bo = std::move(*bo);
-  return {};
-}
-
-// Dispatch a complete kernel launch on the compute queue.
+// Dispatch a complete kernel launch on the compute queue. Scratch handling is
+// by far the most complicated piece here. Functionally, it defers allocation to
+// the watcher thread to be handled in the background without stalling the user.
 std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
                                                   const DispatchConfig &cfg,
                                                   const Buffer &kernarg) {
@@ -495,7 +667,39 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
 
   detail::LockGuard guard(*base.submit_mtx);
 
-  KFD_CHECK(ensure_scratch(private_segment_size, cfg.block));
+  auto *sctx = base.scratch_watch_ctx.get();
+  if (__atomic_load_n(&sctx->error, __ATOMIC_RELAXED))
+    return kfd::unexpected(sctx->error, "scratch allocation failed");
+
+  bool needs_resize = false;
+  uint32_t current_seq = sctx->seq;
+
+  // This launch requires more scratch than we currently have allocated. We will
+  // need to push a request and stall the CP until the previous work has
+  // completed and the new scratch region is allocated by the watcher thread.
+  if (private_segment_size >
+      __atomic_load_n(&sctx->scratch_per_thread, __ATOMIC_RELAXED)) {
+    size_t per_wave = detail::align_up(
+        size_t(detail::SCRATCH_LANES_PER_WAVE) * private_segment_size,
+        size_t(detail::scratch_alignment_unit(base.dev->gfx_version())));
+    if (per_wave > detail::max_wave_scratch(base.dev->gfx_version()))
+      return kfd::unexpected(
+          ERANGE, "scratch %u B exceeds hardware per-wave limit (%u B / wave)",
+          private_segment_size,
+          detail::max_wave_scratch(base.dev->gfx_version()));
+
+    ScratchRequest req{private_segment_size, cfg.block,
+                       kd.kernel_code_properties};
+
+    detail::LockGuard request_guard(sctx->mtx);
+    KFD_CHECK(sctx->requests.push_back(req));
+
+    current_seq = ++sctx->seq;
+    needs_resize = true;
+  }
+
+  uint32_t done = __atomic_load_n(&base.ctl()->scratch_done, __ATOMIC_ACQUIRE);
+  bool needs_ib_stall = private_segment_size > 0 && current_seq > done;
 
   const void *dispatch_pkt_addr = nullptr;
   if (kd.kernel_code_properties & abi::ENABLE_SGPR_DISPATCH_PTR)
@@ -503,11 +707,42 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
         static_cast<std::byte *>(kernarg.data()) +
         detail::align_up(static_cast<size_t>(kd.kernarg_size), size_t(64));
 
+  // Perform the standard register setup for the PM4 compute dispatch.
   uint32_t buf[pm4::MAX_DISPATCH_DWORDS];
-  auto n = pm4::build_dispatch(
+  void *va = __atomic_load_n(&sctx->scratch_va, __ATOMIC_RELAXED);
+  uint32_t tmpring = __atomic_load_n(&sctx->scratch_tmpring, __ATOMIC_RELAXED);
+  auto n = pm4::build_dispatch_setup(
       buf, base.dev->gfx_version(), kd, kernel.address, cfg.grid, cfg.block,
-      kernarg.data(), dispatch_pkt_addr, base.scratch_va, scratch_tmpring,
-      cfg.dynamic_lds, private_segment_size);
+      kernarg.data(), dispatch_pkt_addr, va, tmpring, cfg.dynamic_lds,
+      private_segment_size);
+
+  // Here we are either waiting for a scratch allocation or stalled behind
+  // another kernel that is. We already encoded the scratch base so we use an
+  // indirect buffer to override it dynamically once the memory is allocated.
+  if (needs_ib_stall) {
+    if (needs_resize) {
+      // Wake up the context watcher thread once the previous work has finished.
+      n += pm4::release_mem(buf + n, base.dev->gfx_version(),
+                            &base.ctl()->scratch_ready, current_seq);
+      n += pm4::release_mem(
+          buf + n, base.dev->gfx_version(), base.scratch_event->signal_addr(),
+          base.scratch_event->event_id(), base.scratch_event->trigger_data());
+    }
+
+    // Stall the CP until the watcher thread has finished the allocation.
+    n += pm4::wait_reg_mem(buf + n, base.dev->gfx_version(),
+                           &base.ctl()->scratch_done, Condition::GTE,
+                           current_seq);
+    n += pm4::indirect_buffer(buf + n, base.ctl()->indirect,
+                              QueueBase::MAX_SCRATCH_IB_DWORDS,
+                              pm4::CachePolicy::POLICY_BYPASS);
+  }
+
+  // Push the final dispatch with the full configuration.
+  n += pm4::dispatch_direct(
+      buf + n, cfg.grid.x, cfg.grid.y, cfg.grid.z,
+      pm4::dispatch_initiator(kd, base.dev->gfx_version()));
+
   return base.submit_impl(buf, n);
 }
 
@@ -526,67 +761,6 @@ uint32_t ComputeQueue::build_signal_packet(uint32_t *buf, Signal &sig) {
   n += pm4::release_mem(buf + n, base.dev->gfx_version(), sig.signal_addr(),
                         sig.event_id(), sig.trigger_data());
   return n;
-}
-
-std::expected<void, Error> ComputeQueue::ensure_scratch(uint32_t needed,
-                                                        Dim3 block) {
-  if (needed <= scratch_per_thread)
-    return {};
-
-  size_t per_wave = detail::align_up(
-      size_t(detail::SCRATCH_LANES_PER_WAVE) * needed,
-      size_t(detail::scratch_alignment_unit(base.dev->gfx_version())));
-  if (per_wave > detail::max_wave_scratch(base.dev->gfx_version()))
-    return kfd::unexpected(
-        ERANGE, "scratch %u B exceeds hardware per-wave limit (%u B / wave)",
-        needed, detail::max_wave_scratch(base.dev->gfx_version()));
-
-  // Drain all in-flight work so the current scratch region has no remaining
-  // references. Using PM4 does not allow the independent sizing that AQL uses.
-  // TODO: Stop this from blocking the user thread using an indirect buffer to
-  //       overwrite the scratch base register allocation.
-  if (base.scratch_va) {
-    auto sig = KFD_TRY(Signal::create(*base.ctx));
-
-    // We are inside the queue mutex.
-    uint32_t buf[SIGNAL_DWORDS];
-    uint32_t n = build_signal_packet(buf, sig);
-    KFD_CHECK(base.submit_impl(buf, n));
-
-    KFD_CHECK(sig.wait(Condition::EQ, 0, UINT64_MAX));
-
-    KFD_CHECK(release_scratch_region(base.scratch_va, base.scratch_size,
-                                     &base.scratch_bo));
-    base.scratch_va = nullptr;
-    base.scratch_size = 0;
-    scratch_tmpring = 0;
-    scratch_per_thread = 0;
-    scratch_region_size = 0;
-  }
-
-  // Size scratch to the full device capacity, If scratch memory is exhausted,
-  // progressively reduce the wave count until something fits.
-  uint32_t slots = detail::scratch_device_slots(*base.dev);
-  uint32_t num_se = detail::scratch_num_se(*base.dev);
-  uint32_t waves_per_group =
-      detail::max(static_cast<uint32_t>((uint64_t(block.x) * block.y * block.z +
-                                         detail::SCRATCH_LANES_PER_WAVE - 1) /
-                                        detail::SCRATCH_LANES_PER_WAVE),
-                  1u);
-
-  auto retry = [](const std::expected<void, Error> &r) {
-    return !r && r.error().code == ENOMEM;
-  };
-  uint32_t min_slots = 2 * num_se;
-  while (slots >= min_slots) {
-    if (auto r = try_scratch_alloc(needed, slots); !retry(r))
-      return r;
-    slots -= waves_per_group;
-    slots = (slots / num_se) * num_se;
-  }
-
-  return kfd::unexpected(ENOMEM, "scratch allocation failed after reducing "
-                                 "occupancy to minimum");
 }
 
 // SDMA queues execute packets in-order to copy between PCI-e or XGMI.

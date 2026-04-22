@@ -738,12 +738,59 @@ inline uint32_t indirect_buffer(uint32_t *out, const void *ib_addr,
   return INDIRECT_BUFFER_DWORDS;
 }
 
-inline constexpr uint32_t MAX_DISPATCH_DWORDS = 128;
+// Build the 4-word V# buffer resource descriptor (SRD) for the private
+// segment buffer.
+inline void build_scratch_srd(uint32_t *v, uint32_t gfx_version,
+                              const void *scratch_base, uint32_t tmpring_size,
+                              uint16_t props) {
+  uint64_t base = reinterpret_cast<uintptr_t>(scratch_base);
+  uint32_t waves = tmpring_size & 0xFFFu;
+  uint32_t wavesize = tmpring_size >> 12;
+  constexpr uint32_t DST_SEL = (4u << 0) | (5u << 3) | (6u << 6) | (7u << 9);
+  v[0] = detail::lo(base);
+  v[1] = (detail::hi(base) & 0xFFFFu) | (1u << 31);
+  v[2] = waves * wavesize * detail::scratch_alignment_unit(gfx_version);
+  if (gfx_version >= abi::GFX_VERSION_GFX10_1) {
+    bool wave32 = props & abi::ENABLE_WAVEFRONT_SIZE32;
+    v[3] = DST_SEL | (0x14u << 12) | ((wave32 ? 2u : 3u) << 21) | (1u << 23) |
+           (1u << 24) | (2u << 28);
+  } else {
+    v[3] = DST_SEL | (4u << 12) | (4u << 15) | (1u << 19) | (3u << 21) |
+           (1u << 23);
+  }
+}
 
-// Encode the full register-programming + dispatch sequence into 'out'.
-// Reads resource registers and user SGPR layout directly from the kernel
-// descriptor. Returns the number of dwords written; 'out' must have
-// room for at least MAX_DISPATCH_DWORDS.
+// Write SET_SH_REG packets for COMPUTE_DISPATCH_SCRATCH_BASE_LO/HI and
+// COMPUTE_TMPRING_SIZE. These tell the SPI where the scratch backing store
+// lives and how it is partitioned across waves.
+inline uint32_t set_scratch_base(uint32_t *out, uint32_t gfx_version,
+                                 const void *scratch_base,
+                                 uint32_t tmpring_size) {
+  uint32_t n = 0;
+  if (gfx_version >= abi::GFX_VERSION_GFX9) {
+    uint64_t shifted = reinterpret_cast<uintptr_t>(scratch_base) >> 8;
+    const uint32_t vals[] = {detail::lo(shifted), detail::hi(shifted)};
+    n += set_sh_reg(out + n, regs::COMPUTE_DISPATCH_SCRATCH_BASE_LO, vals, 2);
+  }
+  n += set_sh_reg(out + n, regs::COMPUTE_TMPRING_SIZE, tmpring_size);
+  return n;
+}
+
+// Compute the DISPATCH_DIRECT initiator bits from a kernel descriptor.
+inline uint32_t dispatch_initiator(const abi::KernelDescriptor &kd,
+                                   uint32_t gfx_version) {
+  uint32_t init =
+      regs::DISPATCH_COMPUTE_SHADER_EN | regs::DISPATCH_FORCE_START_AT_000;
+  if ((kd.kernel_code_properties & abi::ENABLE_WAVEFRONT_SIZE32) &&
+      gfx_version >= abi::GFX_VERSION_GFX10_1)
+    init |= regs::DISPATCH_CS_W32_EN;
+  return init;
+}
+
+inline constexpr uint32_t MAX_DISPATCH_DWORDS = 132;
+
+// Encode the register-programming sequence for a compute dispatch into 'out'.
+// The resulting buffer can be invoked through a DISPATCH_DIRECT packet.
 //
 // 'grid' is the number of work-groups per dimension; 'block' is threads per
 // work-group. DISPATCH_DIRECT receives work-group counts directly (we do not
@@ -756,16 +803,14 @@ inline constexpr uint32_t MAX_DISPATCH_DWORDS = 128;
 // 'scratch_base' is the GPU VA of the scratch buffer (256B-aligned).
 // 'tmpring_size' is the packed COMPUTE_TMPRING_SIZE register value
 // (WAVES [11:0], WAVESIZE [24:12]+), as returned by compute_tmpring_size().
-inline uint32_t
-build_dispatch(uint32_t *out, uint32_t gfx_version,
-               const abi::KernelDescriptor &kd, const void *entry_addr,
-               Dim3 grid, Dim3 block, const void *kernarg_addr = nullptr,
-               const void *dispatch_pkt_addr = nullptr,
-               const void *scratch_base = nullptr, uint32_t tmpring_size = 0,
-               uint32_t dynamic_lds = 0, uint32_t private_segment_size = 0) {
+inline uint32_t build_dispatch_setup(
+    uint32_t *out, uint32_t gfx_version, const abi::KernelDescriptor &kd,
+    const void *entry_addr, Dim3 grid, Dim3 block,
+    const void *kernarg_addr = nullptr, const void *dispatch_pkt_addr = nullptr,
+    const void *scratch_base = nullptr, uint32_t tmpring_size = 0,
+    uint32_t dynamic_lds = 0, uint32_t private_segment_size = 0) {
   uint32_t written = 0;
 
-  // Set the grid dimensions, most of these are unused so we zero them.
   const uint32_t dims[] = {
       0,       0,       0,       // COMPUTE_START_X/Y/Z
       block.x, block.y, block.z, // COMPUTE_NUM_THREAD_X/Y/Z
@@ -773,98 +818,49 @@ build_dispatch(uint32_t *out, uint32_t gfx_version,
   };
   written += set_sh_reg(out + written, regs::COMPUTE_START_X, dims, 8);
 
-  // Set the kernel entry address (+ scratch base on GFX9+).
-  // SCRATCH_BASE_LO/HI serves two roles depending on generation:
-  //   GFX9-10: SPI uses this to compute each wave's Scratch Wave Offset.
-  //   GFX11+:  SPI directly initializes each wave's FLAT_SCRATCH register from
-  //            this base + per-wave offset, No user SGPRs needed.
+  // Program address. SCRATCH_BASE_LO/HI is set separately via
+  // set_scratch_base so the watcher IB can override it after a resize.
   uint64_t entry_shifted = reinterpret_cast<uintptr_t>(entry_addr) >> 8;
   if (gfx_version >= abi::GFX_VERSION_GFX9) {
-    uint64_t scratch_shifted = reinterpret_cast<uintptr_t>(scratch_base) >> 8;
-    const uint32_t pgm[] = {
-        detail::lo(entry_shifted), // PGM_LO
-        detail::hi(entry_shifted), // PGM_HI
-        0,
-        0,                           // PKT_ADDR_LO/HI (AQL only)
-        detail::lo(scratch_shifted), // SCRATCH_BASE_LO
-        detail::hi(scratch_shifted), // SCRATCH_BASE_HI
-    };
-    written += set_sh_reg(out + written, regs::COMPUTE_PGM_LO, pgm, 6);
+    const uint32_t pgm[] = {detail::lo(entry_shifted),
+                            detail::hi(entry_shifted), 0, 0};
+    written += set_sh_reg(out + written, regs::COMPUTE_PGM_LO, pgm, 4);
   } else {
     const uint32_t pgm[] = {detail::lo(entry_shifted),
                             detail::hi(entry_shifted)};
     written += set_sh_reg(out + written, regs::COMPUTE_PGM_LO, pgm, 2);
   }
 
-  // Set Program resource descriptors. The descriptor leaves GRANULATED_LDS_SIZE
-  // zeroed (the AQL CP fills it); for PM4 we must set it ourselves. The
-  // granularity is 512 bytes on all generations.
   uint32_t lds_bytes = kd.group_segment_fixed_size + dynamic_lds;
   uint32_t lds_blocks = (detail::align_up(lds_bytes, 512u)) / 512u;
   uint32_t rsrc2 = kd.compute_pgm_rsrc2 | (lds_blocks << 15);
   const uint32_t rsrc[] = {kd.compute_pgm_rsrc1, rsrc2};
   written += set_sh_reg(out + written, regs::COMPUTE_PGM_RSRC1, rsrc, 2);
 
-  // Set extended resource descriptor only when needed by the descriptor.
   if (kd.compute_pgm_rsrc3 != 0)
     written += set_sh_reg(out + written, regs::COMPUTE_PGM_RSRC3,
                           kd.compute_pgm_rsrc3);
 
-  // Set occupancy limits, SIMD masks, scratch ring (6 contiguous registers).
-  const uint32_t res[] = {
-      0, // RESOURCE_LIMITS
-      0xFFFFFFFF,
-      0xFFFFFFFF,   // SE0, SE1
-      tmpring_size, // TMPRING_SIZE
-      0xFFFFFFFF,
-      0xFFFFFFFF, // SE2, SE3
-  };
-  written += set_sh_reg(out + written, regs::COMPUTE_RESOURCE_LIMITS, res, 6);
+  // Occupancy limits and SIMD masks. TMPRING_SIZE is set separately via
+  // set_scratch_base so the watcher IB can override it after a resize.
+  const uint32_t res1[] = {0, 0xFFFFFFFF, 0xFFFFFFFF};
+  written += set_sh_reg(out + written, regs::COMPUTE_RESOURCE_LIMITS, res1, 3);
+  const uint32_t res2[] = {0xFFFFFFFF, 0xFFFFFFFF};
+  written +=
+      set_sh_reg(out + written, regs::COMPUTE_STATIC_THREAD_MGMT_SE2, res2, 2);
 
-  // Zero out preemption handling, this is implicit to the hardware.
   const uint32_t restart[] = {0, 0, 0, 0};
   written += set_sh_reg(out + written, regs::COMPUTE_RESTART_X, restart, 4);
 
-  // User SGPRs - packed in ABI-mandated order from kernel_code_properties.
+  // User SGPRs are packed in ABI-mandated order from kernel_code_properties.
   // See the ordering table in abi.h for the slot layout.
   uint32_t user_sgpr[16] = {};
   uint32_t i = 0;
   uint16_t props = kd.kernel_code_properties;
 
   if (props & abi::ENABLE_SGPR_PRIVATE_SEGMENT_BUFFER) {
-    // Buffer resource descriptor (V#) for scratch memory. GFX9-10 compilers
-    // may set this alongside ENABLE_SGPR_FLAT_SCRATCH_INIT; GFX11+ retires
-    // it in favour of architected flat scratch. The kernel's prologue adds
-    // the per-wave Scratch Wave Offset (system SGPR) to word 0 before use.
-    //
-    // References: AMDGPUUsage.rst "Private Segment Buffer"
-    uint64_t base = reinterpret_cast<uintptr_t>(scratch_base);
-    user_sgpr[0] = detail::lo(base);
-    user_sgpr[1] = (detail::hi(base) & 0xFFFFu) | (1u << 31); // SWIZZLE_ENABLE
-
-    // NUM_RECORDS: recover total scratch bytes from the packed TMPRING_SIZE.
-    // WAVESIZE occupies bits [N:12] where N varies by generation (24/26/29),
-    uint32_t waves = tmpring_size & 0xFFFu;
-    uint32_t wavesize = tmpring_size >> 12;
-    user_sgpr[2] =
-        waves * wavesize * detail::scratch_alignment_unit(gfx_version);
-
-    constexpr uint32_t DST_SEL =
-        (4u << 0) | (5u << 3) | (6u << 6) | (7u << 9); // X,Y,Z,W
-    if (gfx_version >= abi::GFX_VERSION_GFX10_1) {
-      bool wave32 = props & abi::ENABLE_WAVEFRONT_SIZE32;
-      user_sgpr[3] = DST_SEL | (0x14u << 12)      // BUF_FORMAT_32_UINT
-                     | ((wave32 ? 2u : 3u) << 21) // INDEX_STRIDE
-                     | (1u << 23)                 // ADD_TID_ENABLE
-                     | (1u << 24)                 // RESOURCE_LEVEL
-                     | (2u << 28);                // OOB_SELECT
-    } else {
-      user_sgpr[3] = DST_SEL | (4u << 12) // NUM_FORMAT_UINT
-                     | (4u << 15)         // DATA_FORMAT_32
-                     | (1u << 19)         // ELEMENT_SIZE (4B)
-                     | (3u << 21)         // INDEX_STRIDE (64)
-                     | (1u << 23);        // ADD_TID_ENABLE
-    }
+    build_scratch_srd(user_sgpr, gfx_version, scratch_base, tmpring_size,
+                      props);
     i += 4;
   }
   if (props & abi::ENABLE_SGPR_DISPATCH_PTR) {
@@ -872,7 +868,7 @@ build_dispatch(uint32_t *out, uint32_t gfx_version,
     user_sgpr[i++] = detail::hi(dispatch_pkt_addr);
   }
   if (props & abi::ENABLE_SGPR_QUEUE_PTR)
-    i += 2; // amd_queue_t pointer; unused for PM4
+    i += 2; // The amd_queue_t pointer, unused for PM4.
   if (props & abi::ENABLE_SGPR_KERNARG_SEGMENT_PTR) {
     user_sgpr[i++] = detail::lo(kernarg_addr);
     user_sgpr[i++] = detail::hi(kernarg_addr);
@@ -903,13 +899,11 @@ build_dispatch(uint32_t *out, uint32_t gfx_version,
     written +=
         set_sh_reg(out + written, regs::COMPUTE_USER_DATA_0, user_sgpr, i);
 
-  // Push the final kernel launch packet.
-  uint32_t initiator =
-      regs::DISPATCH_COMPUTE_SHADER_EN | regs::DISPATCH_FORCE_START_AT_000;
-  if ((kd.kernel_code_properties & abi::ENABLE_WAVEFRONT_SIZE32) &&
-      gfx_version >= abi::GFX_VERSION_GFX10_1)
-    initiator |= regs::DISPATCH_CS_W32_EN;
-  written += dispatch_direct(out + written, grid.x, grid.y, grid.z, initiator);
+  // Scratch base + tmpring via the shared helper. When a scratch resize is
+  // pending, the watcher IB overrides these (plus the scratch-dependent
+  // SGPRs) with fresh values after the WAIT_REG_MEM stall.
+  written +=
+      set_scratch_base(out + written, gfx_version, scratch_base, tmpring_size);
 
   return written;
 }

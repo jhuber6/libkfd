@@ -127,7 +127,7 @@ inline kfd::Buffer alloc_host_buffer(kfd::Device &dev,
 // backoff so tests don't fail spuriously under contention.
 template <typename QueueT, typename... Args>
 std::expected<QueueT, kfd::Error> create_queue(Args &&...args) {
-  constexpr int MAX_RETRIES = 1000;
+  constexpr int MAX_RETRIES = 100;
   constexpr long RETRY_NS = 250'000'000L; // 250 ms
   for (int attempt = 0;; ++attempt) {
     auto q = QueueT::create(std::forward<Args>(args)...);

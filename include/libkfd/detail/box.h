@@ -20,7 +20,8 @@ template <typename T> class Box {
 public:
   template <typename... Args>
   static std::expected<Box, Error> create(Args &&...args) {
-    void *mem = std::aligned_alloc(alignof(T), sizeof(T));
+    constexpr size_t size = (sizeof(T) + alignof(T) - 1) & ~(alignof(T) - 1);
+    void *mem = std::aligned_alloc(alignof(T), size);
     if (!mem)
       return unexpected(ENOMEM, "Box allocation of %zu bytes failed",
                         sizeof(T));

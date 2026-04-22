@@ -31,6 +31,7 @@ namespace kfd {
 
 class Context;
 struct QueueErrorCtx;
+struct ScratchCtx;
 
 enum class QueueType : uint8_t {
   COMPUTE = /*KFD_IOC_QUEUE_TYPE_COMPUTE=*/0x0,
@@ -67,11 +68,17 @@ private:
   // We declare read_ptr as uint64_t so the field is large enough for both
   // cases and expect that no queue will exceed 4 GiB in size. The EOP sequence
   // is increased monotonically to coordinate end-of-pipe events for signals.
+  //
+  // Compute queues also use this to signal scratch requests from the handler.
+  static constexpr size_t MAX_SCRATCH_IB_DWORDS = 20;
   struct QueueControl {
     uint64_t read_ptr;
     uint64_t write_ptr;
     uint64_t eop_seq;
     uint64_t err_payload;
+    uint64_t scratch_ready;
+    uint32_t scratch_done;
+    uint32_t indirect[MAX_SCRATCH_IB_DWORDS];
   };
 
   static std::expected<QueueBase, Error> create(Device &dev, QueueType type,
@@ -91,6 +98,7 @@ private:
   }
   std::expected<void, Error> wait_for_room(uint32_t dwords);
   static void queue_error_handler(Event &event, void *user_data);
+  static void scratch_handler(Event &event, void *user_data);
 
   QueueType type{};
   Context *ctx = nullptr;
@@ -105,13 +113,11 @@ private:
   volatile uint64_t *doorbell = nullptr;
   detail::Box<Event> err_event;
   detail::Box<QueueErrorCtx> err_watch_ctx;
+  detail::Box<Event> scratch_event;
+  detail::Box<ScratchCtx> scratch_watch_ctx;
   detail::Box<detail::Mutex> submit_mtx;
 
   uint64_t pending_wptr = 0;
-
-  Buffer scratch_bo;
-  void *scratch_va = nullptr;
-  size_t scratch_size = 0;
 };
 
 class ComputeQueue {
@@ -255,22 +261,11 @@ private:
   explicit ComputeQueue(QueueBase &&b, Buffer &&vram)
       : eop_seq(std::move(vram)), base(std::move(b)) {}
 
-  std::expected<void, Error> ensure_scratch(uint32_t per_thread, Dim3 block);
-
-  std::expected<void, Error> try_scratch_alloc(uint32_t per_thread,
-                                               uint32_t slots);
-
-  std::expected<void, Error> release_scratch_region(void *va, size_t size,
-                                                    Buffer *bo = nullptr);
-
   uint32_t build_signal_packet(uint32_t *buf, Signal &sig);
 
   Buffer eop_seq;
   QueueBase base;
   uint32_t next_eop_seq = 0;
-  uint32_t scratch_tmpring = 0;
-  uint32_t scratch_per_thread = 0;
-  size_t scratch_region_size = 0;
 };
 
 class SDMAQueue {

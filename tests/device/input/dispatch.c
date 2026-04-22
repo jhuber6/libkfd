@@ -11,6 +11,21 @@ __gpu_kernel void use_scratch(unsigned *out) {
     fn(out, __gpu_thread_id_x());
 }
 
+static void do_scratch_verify(unsigned *out, unsigned tid) {
+  volatile unsigned buf[16];
+  for (unsigned i = 0; i < 16; ++i)
+    buf[i] = tid + i;
+  unsigned sum = 0;
+  for (unsigned i = 0; i < 16; ++i)
+    sum += buf[i];
+  out[tid] = sum;
+}
+
+__gpu_kernel void verify_scratch(unsigned *out) {
+  void (*volatile fn)(unsigned *, unsigned) = do_scratch_verify;
+  fn(out, __gpu_thread_id_x());
+}
+
 __gpu_kernel void store(unsigned *out) {
   if (__gpu_thread_id_x() == 0 && __gpu_block_id_x() == 0)
     *out = 0xCAFEBABE;
