@@ -394,7 +394,8 @@ inline uint32_t eop_fence_flush(uint32_t gfx_version) {
     dw |= (1u << 15)    // EOP_TC_WB_ACTION_EN (L2 writeback)
           | (1u << 16)  // EOP_TCL1_ACTION_EN  (L1 invalidate)
           | (1u << 17)  // EOP_TC_ACTION_EN    (L2 invalidate)
-          | (1u << 21); // EOP_TC_MD_ACTION_EN (L2 metadata)
+          | (1u << 21)  // EOP_TC_MD_ACTION_EN (L2 metadata)
+          | (3u << 25); // CACHE_POLICY = BYPASS (Write skips L2)
   }
   return dw;
 }
@@ -414,7 +415,8 @@ inline uint32_t eop_wb_flush(uint32_t gfx_version) {
           | (3u << 25); // CACHE_POLICY = BYPASS
   } else {
     dw |= (1u << 15)    // EOP_TC_WB_ACTION_EN
-          | (1u << 19); // EOP_TC_NC_ACTION_EN (non-coherent writeback)
+          | (1u << 19)  // EOP_TC_NC_ACTION_EN (non-coherent writeback)
+          | (3u << 25); // CACHE_POLICY = BYPASS
   }
   return dw;
 }

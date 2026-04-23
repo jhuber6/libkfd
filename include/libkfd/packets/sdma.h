@@ -102,14 +102,14 @@ inline uint32_t copy_linear(uint32_t *out, void *dst, const void *src,
 //   [2] addr_hi  - byte address high 32 bits
 //   [3] data     - 32-bit value to write
 //
-// GFX10+ header bits:
+// gfx90a+ / GFX10+ header bits (SDMA 4.4.x+ and all SDMA v5+):
 //   mtype[18:16]=3 (uncached), sys[20]=1, snp[22]=1
 //
 // References: SDMA_PKT_FENCE_HEADER_* in amdgpu/navi10_sdma_pkt_open.h;
 //             sdma_v6_0_ring_emit_fence in amdgpu/sdma_v6_0.c
 inline uint32_t fence(uint32_t *out, uint32_t gfx_version, void *addr,
                       uint32_t value) {
-  if (gfx_version >= abi::GFX_VERSION_GFX10_1)
+  if (gfx_version >= abi::GFX_VERSION_GFX9_A)
     out[0] = FENCE | (3u << 16) | (1u << 20) | (1u << 22);
   else
     out[0] = FENCE;

@@ -192,7 +192,8 @@ public:
     n += pm4::wait_reg_mem(buf + n, base.dev->gfx_version(), eop_seq.data(),
                            Condition::GTE, seq);
     n += pm4::atomic_mem(buf + n, pm4::ATOMIC_ADD_RTN_64, sig.fence_addr(),
-                         int64_t(-1), 0, pm4::ATOMIC_WAIT_CONFIRM);
+                         int64_t(-1), 0, pm4::ATOMIC_WAIT_CONFIRM,
+                         pm4::POLICY_BYPASS);
     n += pm4::release_mem(buf + n, base.dev->gfx_version(), sig.signal_addr(),
                           sig.event_id(), sig.trigger_data());
     return base.submit(buf, n);
