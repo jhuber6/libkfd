@@ -32,10 +32,14 @@ TEST_CASE("Context - device initializes lazily on first access", "[context]") {
   if (ctx->num_devices() == 0)
     SKIP("No GPUs in topology");
 
-  auto dev = ctx->device(0);
-  REQUIRE_RESULT(dev);
-  CHECK((*dev)->render_fd() >= 0);
-  CHECK((*dev)->gpu_id() != 0);
+  for (size_t i = 0; i < ctx->num_devices(); ++i) {
+    DYNAMIC_SECTION("device " << i) {
+      auto dev = ctx->device(i);
+      REQUIRE_RESULT(dev);
+      CHECK((*dev)->render_fd() >= 0);
+      CHECK((*dev)->gpu_id() != 0);
+    }
+  }
 }
 
 TEST_CASE("Context - move construction preserves state", "[context]") {
@@ -50,10 +54,12 @@ TEST_CASE("Context - move construction preserves state", "[context]") {
   CHECK(moved.kfd_fd() == original_fd);
   CHECK(moved.num_devices() == original_ndevs);
 
-  if (moved.num_devices() > 0) {
-    auto dev = moved.device(0);
-    REQUIRE_RESULT(dev);
-    CHECK(&(*dev)->context() == &moved);
+  for (size_t i = 0; i < moved.num_devices(); ++i) {
+    DYNAMIC_SECTION("device " << i) {
+      auto dev = moved.device(i);
+      REQUIRE_RESULT(dev);
+      CHECK(&(*dev)->context() == &moved);
+    }
   }
 }
 
@@ -73,10 +79,12 @@ TEST_CASE("Context - move assignment preserves state", "[context]") {
   CHECK(first->kfd_fd() == second_fd);
   CHECK(first->num_devices() == second_ndevs);
 
-  if (first->num_devices() > 0) {
-    auto dev = first->device(0);
-    REQUIRE_RESULT(dev);
-    CHECK(&(*dev)->context() == &*first);
+  for (size_t i = 0; i < first->num_devices(); ++i) {
+    DYNAMIC_SECTION("device " << i) {
+      auto dev = first->device(i);
+      REQUIRE_RESULT(dev);
+      CHECK(&(*dev)->context() == &*first);
+    }
   }
 }
 
@@ -91,22 +99,24 @@ TEST_CASE("Context - multiple contexts coexist", "[context]") {
   CHECK(a->kfd_fd() != b->kfd_fd());
   CHECK(a->num_devices() == b->num_devices());
 
-  if (a->num_devices() > 0) {
-    auto dev_a = a->device(0);
-    auto dev_b = b->device(0);
-    REQUIRE_RESULT(dev_a);
-    REQUIRE_RESULT(dev_b);
-    CHECK(&(*dev_a)->context() == &*a);
-    CHECK(&(*dev_b)->context() == &*b);
-    CHECK((*dev_a)->gpu_id() == (*dev_b)->gpu_id());
-
-    auto ver_a = a->version();
-    auto ver_b = b->version();
-    REQUIRE_RESULT(ver_a);
-    REQUIRE_RESULT(ver_b);
-    CHECK(ver_a->major == ver_b->major);
-    CHECK(ver_a->minor == ver_b->minor);
+  for (size_t i = 0; i < a->num_devices(); ++i) {
+    DYNAMIC_SECTION("device " << i) {
+      auto dev_a = a->device(i);
+      auto dev_b = b->device(i);
+      REQUIRE_RESULT(dev_a);
+      REQUIRE_RESULT(dev_b);
+      CHECK(&(*dev_a)->context() == &*a);
+      CHECK(&(*dev_b)->context() == &*b);
+      CHECK((*dev_a)->gpu_id() == (*dev_b)->gpu_id());
+    }
   }
+
+  auto ver_a = a->version();
+  auto ver_b = b->version();
+  REQUIRE_RESULT(ver_a);
+  REQUIRE_RESULT(ver_b);
+  CHECK(ver_a->major == ver_b->major);
+  CHECK(ver_a->minor == ver_b->minor);
 }
 
 TEST_CASE("Context - node properties have reasonable values", "[context]") {

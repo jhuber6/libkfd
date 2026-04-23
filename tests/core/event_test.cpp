@@ -38,100 +38,122 @@ TEST_CASE("Event - GPU release_mem signals event via Signal",
           "[event][queue]") {
   auto &ctx = require_ctx();
 
-  auto dev = ctx.device(0);
-  REQUIRE_RESULT(dev);
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto dev = ctx.device(di);
+      REQUIRE_RESULT(dev);
 
-  auto queue = kfd::ComputeQueue::create(**dev);
-  REQUIRE_RESULT(queue);
+      auto queue = kfd::ComputeQueue::create(**dev);
+      REQUIRE_RESULT(queue);
 
-  auto sig = kfd::Signal::create(ctx);
-  REQUIRE_RESULT(sig);
-  REQUIRE_RESULT(queue->signal(*sig));
-  REQUIRE_RESULT(sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
+      REQUIRE_RESULT(queue->signal(*sig));
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+    }
+  }
 }
 
 TEST_CASE("Event - signal wait after write_data", "[event][queue]") {
-  auto &gpu = kfd::test::require_gpu();
-  auto &ctx = gpu.context();
+  auto &ctx = require_ctx();
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = kfd::test::require_gpu(ctx, di);
 
-  auto queue = kfd::ComputeQueue::create(gpu);
-  REQUIRE_RESULT(queue);
+      auto queue = kfd::ComputeQueue::create(gpu);
+      REQUIRE_RESULT(queue);
 
-  auto sig = kfd::Signal::create(ctx);
-  REQUIRE_RESULT(sig);
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
 
-  auto buf = kfd::test::alloc_host_buffer(gpu, 4096);
-  auto *dst = static_cast<volatile uint32_t *>(buf.data());
-  *dst = 0;
+      auto buf = kfd::test::alloc_host_buffer(gpu, 4096);
+      auto *dst = static_cast<volatile uint32_t *>(buf.data());
+      *dst = 0;
 
-  REQUIRE_RESULT(queue->write_data(buf.data(), 0xDEADBEEF));
-  REQUIRE_RESULT(queue->signal(*sig));
-  REQUIRE_RESULT(sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
-  CHECK(*dst == 0xDEADBEEF);
+      REQUIRE_RESULT(queue->write_data(buf.data(), 0xDEADBEEF));
+      REQUIRE_RESULT(queue->signal(*sig));
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+      CHECK(*dst == 0xDEADBEEF);
+    }
+  }
 }
 
 TEST_CASE("Event - multiple sequential submits", "[event][queue]") {
   auto &ctx = require_ctx();
 
-  auto dev = ctx.device(0);
-  REQUIRE_RESULT(dev);
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto dev = ctx.device(di);
+      REQUIRE_RESULT(dev);
 
-  auto queue = kfd::ComputeQueue::create(**dev);
-  REQUIRE_RESULT(queue);
+      auto queue = kfd::ComputeQueue::create(**dev);
+      REQUIRE_RESULT(queue);
 
-  auto sig = kfd::Signal::create(ctx);
-  REQUIRE_RESULT(sig);
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
 
-  constexpr uint32_t N = 4;
-  for (uint32_t i = 0; i < N; ++i) {
-    if (i != 0)
-      REQUIRE_RESULT(sig->reset());
-    REQUIRE_RESULT(queue->signal(*sig));
-    REQUIRE_RESULT(
-        sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+      constexpr uint32_t N = 4;
+      for (uint32_t i = 0; i < N; ++i) {
+        if (i != 0)
+          REQUIRE_RESULT(sig->reset());
+        REQUIRE_RESULT(queue->signal(*sig));
+        REQUIRE_RESULT(
+            sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+      }
+    }
   }
 }
 
 TEST_CASE("Event - repeated submit+wait cycles", "[event][queue]") {
   auto &ctx = require_ctx();
 
-  auto dev = ctx.device(0);
-  REQUIRE_RESULT(dev);
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto dev = ctx.device(di);
+      REQUIRE_RESULT(dev);
 
-  auto queue = kfd::ComputeQueue::create(**dev);
-  REQUIRE_RESULT(queue);
+      auto queue = kfd::ComputeQueue::create(**dev);
+      REQUIRE_RESULT(queue);
 
-  auto sig = kfd::Signal::create(ctx);
-  REQUIRE_RESULT(sig);
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
 
-  for (uint32_t i = 1; i <= 8; ++i) {
-    if (i != 1)
-      REQUIRE_RESULT(sig->reset());
-    REQUIRE_RESULT(queue->signal(*sig));
-    REQUIRE_RESULT(
-        sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+      for (uint32_t i = 1; i <= 8; ++i) {
+        if (i != 1)
+          REQUIRE_RESULT(sig->reset());
+        REQUIRE_RESULT(queue->signal(*sig));
+        REQUIRE_RESULT(
+            sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+      }
+    }
   }
 }
 
 TEST_CASE("Event - rapid GPU submit cycles", "[event][queue][stress]") {
   auto &ctx = require_ctx();
 
-  auto dev = ctx.device(0);
-  REQUIRE_RESULT(dev);
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto dev = ctx.device(di);
+      REQUIRE_RESULT(dev);
 
-  auto queue = kfd::ComputeQueue::create(**dev);
-  REQUIRE_RESULT(queue);
+      auto queue = kfd::ComputeQueue::create(**dev);
+      REQUIRE_RESULT(queue);
 
-  auto sig = kfd::Signal::create(ctx);
-  REQUIRE_RESULT(sig);
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
 
-  constexpr uint32_t N = 50;
-  for (uint32_t i = 0; i < N; ++i) {
-    if (i != 0)
-      REQUIRE_RESULT(sig->reset());
-    REQUIRE_RESULT(queue->signal(*sig));
-    REQUIRE_RESULT(
-        sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+      constexpr uint32_t N = 50;
+      for (uint32_t i = 0; i < N; ++i) {
+        if (i != 0)
+          REQUIRE_RESULT(sig->reset());
+        REQUIRE_RESULT(queue->signal(*sig));
+        REQUIRE_RESULT(
+            sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+      }
+    }
   }
 }
 

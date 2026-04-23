@@ -60,10 +60,9 @@ inline kfd::Context &require_ctx() {
   return *ctx;
 }
 
-// Returns device 0, SKIPping the test if unavailable.
-inline kfd::Device &require_gpu() {
-  auto &ctx = require_ctx();
-  auto dev = ctx.device(0);
+// Returns device \p i from \p ctx, aborting the current section on failure.
+inline kfd::Device &require_gpu(kfd::Context &ctx, size_t i) {
+  auto dev = ctx.device(i);
   REQUIRE_RESULT(dev);
   return **dev;
 }
@@ -149,16 +148,15 @@ struct DeviceFixture {
 };
 
 inline std::expected<DeviceFixture, kfd::Error>
-make_device_fixture(kfd::Context &ctx, std::span<const TestBinary> kernels) {
-  auto *dev = KFD_TRY(ctx.device(0));
-  auto *bin = find_compatible_binary(kernels, *dev);
+make_device_fixture(kfd::Device &dev, std::span<const TestBinary> kernels) {
+  auto *bin = find_compatible_binary(kernels, dev);
   if (!bin)
     return kfd::unexpected(ENOEXEC, "no compatible kernel for this GPU");
-  auto sdma = KFD_TRY(create_queue<kfd::SDMAQueue>(*dev));
-  auto compute = KFD_TRY(create_queue<kfd::ComputeQueue>(*dev));
+  auto sdma = KFD_TRY(create_queue<kfd::SDMAQueue>(dev));
+  auto compute = KFD_TRY(create_queue<kfd::ComputeQueue>(dev));
   auto buf = read_file(bin->path);
-  auto exe = KFD_TRY(kfd::Executable::load(*dev, buf, sdma, compute));
-  return DeviceFixture{dev, std::move(exe), bin, std::move(sdma),
+  auto exe = KFD_TRY(kfd::Executable::load(dev, buf, sdma, compute));
+  return DeviceFixture{&dev, std::move(exe), bin, std::move(sdma),
                        std::move(compute)};
 }
 
