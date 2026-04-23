@@ -16,9 +16,10 @@ target_sources(kfd PRIVATE
   detail/pool_allocator.cpp
 )
 
-# Build per-architecture AMDGCN trap handler executables. The list here must
-# match the #embed entries in trap_handler.c.
+# Build per-architecture AMDGCN trap handler executables and pass HAS_<arch>
+# defines so trap_handler.c knows which #embed blobs to pull in.
 set(trap_targets "")
+set(trap_arch_defines "")
 foreach(arch IN LISTS LIBKFD_GPU_ARCHS)
     set(target trap_handler_${arch}.bin)
     add_executable(${target} device/trap_handler.S)
@@ -32,7 +33,12 @@ foreach(arch IN LISTS LIBKFD_GPU_ARCHS)
       -Wl,--entry=trap_entry
     )
     list(APPEND trap_targets ${target})
+
+    string(REPLACE "-" "_" arch_id "${arch}")
+    string(TOUPPER "${arch_id}" arch_id)
+    list(APPEND trap_arch_defines "HAS_${arch_id}")
 endforeach()
 
 target_compile_options(kfd PRIVATE --embed-dir=${CMAKE_CURRENT_BINARY_DIR})
+target_compile_definitions(kfd PRIVATE ${trap_arch_defines})
 add_dependencies(kfd ${trap_targets})

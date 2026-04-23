@@ -7,9 +7,9 @@ foreach(lang C CXX)
       "This project requires Clang as the ${lang} compiler, "
       "found ${CMAKE_${lang}_COMPILER_ID}")
   endif()
-  if(CMAKE_${lang}_COMPILER_VERSION VERSION_LESS "21.0")
+  if(CMAKE_${lang}_COMPILER_VERSION VERSION_LESS "20.0")
     message(FATAL_ERROR
-      "Clang >= 21 is required for ${lang}, "
+      "Clang >= 20 is required for ${lang}, "
       "found ${CMAKE_${lang}_COMPILER_VERSION}")
   endif()
 endforeach()
@@ -42,7 +42,7 @@ endif()
 option(LIBKFD_BUILD_TESTS "Build unit and device tests" ${PROJECT_IS_TOP_LEVEL})
 
 # AMDGPU architectures to compile for (test kernels, trap handlers, etc.).
-set(LIBKFD_GPU_ARCHS
+set(LIBKFD_GPU_ALL_ARCHS
   gfx908
   gfx90a
   gfx9-generic
@@ -56,6 +56,22 @@ set(LIBKFD_GPU_ARCHS
   gfx12-generic
   gfx12-5-generic
 )
+
+set(LIBKFD_GPU_ARCHS "")
+foreach(arch IN LISTS LIBKFD_GPU_ALL_ARCHS)
+  try_compile(_arch_ok
+    SOURCE_FROM_CONTENT test_${arg}.c "void _start(void) {}"
+    COMPILE_DEFINITIONS --target=amdgcn--amdhsa -mcpu=${arch} -nogpulib
+    LINK_OPTIONS --target=amdgcn--amdhsa -mcpu=${arch}
+  )
+  if(_arch_ok)
+    list(APPEND LIBKFD_GPU_ARCHS ${arch})
+  else()
+    message(STATUS "Skipping unsupported GPU arch: ${arch}")
+  endif()
+  unset(_arch_ok CACHE)
+endforeach()
+message(STATUS "AMDGPU architectures: ${LIBKFD_GPU_ARCHS}")
 
 set(common_compile_options
   -Wall

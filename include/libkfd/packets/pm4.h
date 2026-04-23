@@ -128,6 +128,20 @@ inline constexpr uint32_t DISPATCH_CS_W32_EN = 1u << 15;
 // value, the CP simply advances until it hits real packets at wptr.
 inline constexpr uint32_t CMD_NOP = header(NOP, 0x3FFF);
 
+// Write a properly-sized NOP packet spanning exactly `dwords` ring slots.
+// A single NOP header encodes the body count in its COUNT field.
+inline void nop_fill(uint32_t *out, uint32_t dwords) {
+  if (dwords == 0)
+    return;
+  if (dwords == 1) {
+    out[0] = CMD_NOP;
+    return;
+  }
+  out[0] = header(NOP, static_cast<uint16_t>(dwords - 2));
+  for (uint32_t i = 1; i < dwords; ++i)
+    out[i] = 0;
+}
+
 // L2 cache allocation policy. Shared field encoding at bits [26:25] across
 // RELEASE_MEM, ATOMIC_MEM, WRITE_DATA, and WAIT_REG_MEM.
 //

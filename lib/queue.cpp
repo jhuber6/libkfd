@@ -616,8 +616,7 @@ std::expected<void, Error> QueueBase::submit_impl(const uint32_t *data,
       for (uint32_t i = 1; i < pad; ++i)
         base[pos + i] = 0;
     } else {
-      for (uint32_t i = 0; i < pad; ++i)
-        base[pos + i] = pm4::CMD_NOP;
+      pm4::nop_fill(base + pos, pad);
     }
 
     pending_wptr += pad;
