@@ -36,6 +36,16 @@ constexpr uint32_t gfx_version_major(uint32_t v) { return (v / 10000) % 100; }
 constexpr uint32_t gfx_version_minor(uint32_t v) { return (v / 100) % 100; }
 constexpr uint32_t gfx_version_step(uint32_t v) { return v % 100; }
 
+// COMPUTE_PGM_RSRC1 bit 20: launch waves with STATUS.PRIV=1.
+inline constexpr uint32_t COMPUTE_PGM_RSRC1_PRIV = 1u << 20;
+
+// GFX11.0.x has a HW defect that suppresses CWSR, under PRIV=1, s_trap 2 is
+// interpreted as a NOP on these chips. However LLVM has a software work-around
+// so we set this manually.
+constexpr bool needs_cwsr_priv_wa(uint32_t gfx) {
+  return gfx_version_major(gfx) == 11 && gfx_version_minor(gfx) == 0;
+}
+
 // Required alignment for the private scratch region.
 constexpr size_t PRIVATE_SEGMENT_ALIGN = 0x10000;
 
@@ -146,6 +156,7 @@ struct KernelDescriptor {
   //   [15:14] FLOAT_ROUND_MODE_16_64  Rounding for f16/f64
   //   [17:16] FLOAT_DENORM_MODE_32    Denorm handling for f32
   //   [19:18] FLOAT_DENORM_MODE_16_64 Denorm handling for f16/f64
+  //   [20]    PRIV                 Launch with STATUS.PRIV=1
   //   [21]    ENABLE_DX10_CLAMP    GFX6-11: DX10 NaN clamp
   //                                GFX12: WG_RR_EN (round-robin scheduling)
   //   [23]    ENABLE_IEEE_MODE     GFX6-11: IEEE mode

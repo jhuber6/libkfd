@@ -3,7 +3,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cerrno>
 #include <ctime>
-#include <libkfd/abi.h>
 #include <vector>
 
 static const kfd::test::TestBinary preempt_kernels[] = {
@@ -17,14 +16,6 @@ using kfd::test::require_ctx;
 using kfd::test::require_gpu;
 
 namespace {
-
-// MES firmware for GFX11.0.x cards only implements full CWSR support for AQL
-// queues, PM4 queues can only use drain-based preemption. This is a hard
-// restriction if we want to use PM4, which means that CWSR cannot work.
-constexpr bool has_cwsr_wave_preemption(uint32_t gfx) {
-  return !(gfx >= kfd::abi::GFX_VERSION_GFX11 &&
-           gfx < kfd::abi::GFX_VERSION_GFX11_5);
-}
 
 constexpr struct timespec SETTLE = {.tv_sec = 0, .tv_nsec = 100'000'000};
 
@@ -70,8 +61,6 @@ TEST_CASE("CWSR - queue destruction preempts spinning kernel",
 
       if (fix->gpu->properties().cwsr_size == 0)
         SKIP("CWSR not supported on this device");
-      if (!has_cwsr_wave_preemption(fix->gpu->gfx_version()))
-        SKIP("MES cannot wave-preempt PM4 queues on this GFX11 device");
 
       auto kernel = fix->exe.kernel("spin_on_flag.kd");
       REQUIRE_RESULT(kernel);
@@ -106,8 +95,6 @@ TEST_CASE("CWSR - preemption with active scratch", "[device][cwsr]") {
 
       if (fix->gpu->properties().cwsr_size == 0)
         SKIP("CWSR not supported on this device");
-      if (!has_cwsr_wave_preemption(fix->gpu->gfx_version()))
-        SKIP("MES cannot wave-preempt PM4 queues on this GFX11 device");
 
       auto kernel = fix->exe.kernel("spin_with_scratch.kd");
       REQUIRE_RESULT(kernel);
@@ -142,8 +129,6 @@ TEST_CASE("CWSR - repeated preemption stress", "[device][cwsr][stress]") {
 
       if (fix->gpu->properties().cwsr_size == 0)
         SKIP("CWSR not supported on this device");
-      if (!has_cwsr_wave_preemption(fix->gpu->gfx_version()))
-        SKIP("MES cannot wave-preempt PM4 queues on this GFX11 device");
 
       auto kernel = fix->exe.kernel("spin_on_flag.kd");
       REQUIRE_RESULT(kernel);
@@ -184,8 +169,6 @@ TEST_CASE("CWSR - concurrent queue preemption", "[device][cwsr]") {
 
       if (fix->gpu->properties().cwsr_size == 0)
         SKIP("CWSR not supported on this device");
-      if (!has_cwsr_wave_preemption(fix->gpu->gfx_version()))
-        SKIP("MES cannot wave-preempt PM4 queues on this GFX11 device");
 
       auto kernel = fix->exe.kernel("spin_on_flag.kd");
       REQUIRE_RESULT(kernel);

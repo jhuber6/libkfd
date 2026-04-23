@@ -858,8 +858,11 @@ inline uint32_t build_dispatch_setup(
 
   uint32_t lds_bytes = kd.group_segment_fixed_size + dynamic_lds;
   uint32_t lds_blocks = (detail::align_up(lds_bytes, 512u)) / 512u;
+  uint32_t rsrc1 = kd.compute_pgm_rsrc1;
+  if (abi::needs_cwsr_priv_wa(gfx_version))
+    rsrc1 |= abi::COMPUTE_PGM_RSRC1_PRIV;
   uint32_t rsrc2 = kd.compute_pgm_rsrc2 | (lds_blocks << 15);
-  const uint32_t rsrc[] = {kd.compute_pgm_rsrc1, rsrc2};
+  const uint32_t rsrc[] = {rsrc1, rsrc2};
   written += set_sh_reg(out + written, regs::COMPUTE_PGM_RSRC1, rsrc, 2);
 
   written +=
