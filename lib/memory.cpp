@@ -11,6 +11,7 @@
 
 #include <cerrno>
 #include <sys/mman.h>
+#include <unistd.h>
 
 static_assert(static_cast<uint32_t>(kfd::MemType::VRAM) ==
               KFD_IOC_ALLOC_MEM_FLAGS_VRAM);
@@ -223,6 +224,38 @@ std::expected<void, Error> Buffer::unmap(std::span<Device *const> targets) {
   }
 
   return {};
+}
+
+std::expected<DMABuffer, Error> DMABuffer::create(Buffer &buf, uint32_t flags) {
+  if (!buf)
+    return kfd::unexpected(EINVAL, "export_dmabuf called on null buffer");
+
+  Context &ctx = buf.owner->context();
+
+  ioctl::kfd::export_dmabuf_args args{
+      .handle = buf.handle,
+      .flags = flags,
+  };
+  KFD_CHECK(ioctl::call<ioctl::kfd::EXPORT_DMABUF>(ctx.kfd_fd(), args));
+
+  return DMABuffer(static_cast<int>(args.dmabuf_fd));
+}
+
+DMABuffer::~DMABuffer() {
+  if (dmabuf_fd >= 0)
+    ::close(dmabuf_fd);
+}
+
+DMABuffer::DMABuffer(DMABuffer &&other)
+    : dmabuf_fd(std::exchange(other.dmabuf_fd, -1)) {}
+
+DMABuffer &DMABuffer::operator=(DMABuffer &&other) {
+  if (this != &other) {
+    if (dmabuf_fd >= 0)
+      ::close(dmabuf_fd);
+    dmabuf_fd = std::exchange(other.dmabuf_fd, -1);
+  }
+  return *this;
 }
 
 } // namespace kfd

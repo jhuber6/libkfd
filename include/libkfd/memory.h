@@ -111,6 +111,7 @@ public:
 
 private:
   friend class Device;
+  friend class DMABuffer;
   friend class QueueBase;
   friend class ComputeQueue;
 
@@ -127,6 +128,31 @@ private:
   detail::Box<detail::Mutex> mtx;
   detail::SmallVector<uint32_t, 2> mapped_ids;
   Device *owner = nullptr;
+};
+
+// Get a DMA buffer interface to an existing buffer object. Exposes the standard
+// POSIX file interface over the device memory.
+class DMABuffer {
+public:
+  DMABuffer() = default;
+  ~DMABuffer();
+
+  static std::expected<DMABuffer, Error> create(Buffer &buf,
+                                                uint32_t flags = 0);
+
+  DMABuffer(const DMABuffer &) = delete;
+  DMABuffer &operator=(const DMABuffer &) = delete;
+  DMABuffer(DMABuffer &&other);
+  DMABuffer &operator=(DMABuffer &&other);
+
+  int fd() const { return dmabuf_fd; }
+
+  explicit operator bool() const { return dmabuf_fd >= 0; }
+
+private:
+  explicit DMABuffer(int fd) : dmabuf_fd(fd) {}
+
+  int dmabuf_fd = -1;
 };
 
 } // namespace kfd

@@ -48,6 +48,7 @@ using svm_attribute = ::kfd_ioctl_svm_attribute;
 using set_xnack_mode_args = ::kfd_ioctl_set_xnack_mode_args;
 using set_trap_handler_args = ::kfd_ioctl_set_trap_handler_args;
 using runtime_enable_args = ::kfd_ioctl_runtime_enable_args;
+using export_dmabuf_args = ::kfd_ioctl_export_dmabuf_args;
 
 inline constexpr unsigned long GET_VERSION = AMDKFD_IOC_GET_VERSION;
 inline constexpr unsigned long ACQUIRE_VM = AMDKFD_IOC_ACQUIRE_VM;
@@ -75,6 +76,7 @@ inline constexpr unsigned long SVM = AMDKFD_IOC_SVM;
 inline constexpr unsigned long SET_XNACK_MODE = AMDKFD_IOC_SET_XNACK_MODE;
 inline constexpr unsigned long SET_TRAP_HANDLER = AMDKFD_IOC_SET_TRAP_HANDLER;
 inline constexpr unsigned long RUNTIME_ENABLE = AMDKFD_IOC_RUNTIME_ENABLE;
+inline constexpr unsigned long EXPORT_DMABUF = AMDKFD_IOC_EXPORT_DMABUF;
 
 } // namespace kfd
 
