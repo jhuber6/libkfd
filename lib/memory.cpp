@@ -8,6 +8,7 @@
 #include "ioctl.h"
 #include "libkfd/context.h"
 #include "libkfd/detail/utility.h"
+#include "libkfd/device.h"
 
 #include <cerrno>
 #include <sys/mman.h>
@@ -90,6 +91,12 @@ Buffer &Buffer::operator=(Buffer &&other) {
 std::expected<Buffer, Error> Buffer::allocate(Device &dev, size_t size,
                                               MemType type, MemFlags flags,
                                               void *addr) {
+  if (type == MemType::VRAM &&
+      (flags & MemFlags::HOST_ACCESS) != MemFlags::NONE &&
+      !dev.vram_host_visible())
+    return kfd::unexpected(ENOTSUP,
+                           "HOST_ACCESS on VRAM requires large PCI-e BAR");
+
   Context &ctx = dev.context();
   size = align_up(size, page_size());
 

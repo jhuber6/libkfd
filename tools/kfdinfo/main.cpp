@@ -36,13 +36,15 @@ const char *heap_type_name(uint32_t type) {
   case 0:
     return "System";
   case 1:
-    return "VRAM";
+    return "VRAM (public)";
   case 2:
-    return "LDS";
+    return "VRAM (private)";
   case 3:
-    return "Scratch";
+    return "GDS";
   case 4:
-    return "SVM";
+    return "LDS";
+  case 5:
+    return "Scratch";
   default:
     return "Unknown";
   }
@@ -176,7 +178,8 @@ void print_node(const kfd::NodeInfo &node, uint32_t index) {
   uint64_t vram_total = p.local_mem_size;
   if (!vram_total) {
     for (size_t i = 0; i < node.memory_banks.size(); ++i)
-      if (node.memory_banks[i].heap_type == 1)
+      if (node.memory_banks[i].heap_type == 1 ||
+          node.memory_banks[i].heap_type == 2)
         vram_total += node.memory_banks[i].size_in_bytes;
   }
   if (vram_total) {

@@ -512,6 +512,9 @@ TEST_CASE("Queue - DMA_DATA copy GTT to VRAM and back", "[queue][dma]") {
     DYNAMIC_SECTION("device " << di) {
       auto &gpu = require_gpu(ctx, di);
 
+      if (!gpu.vram_host_visible())
+        SKIP("Device does not support host-visible VRAM (large BAR disabled)");
+
       auto queue = kfd::ComputeQueue::create(gpu);
       REQUIRE_RESULT(queue);
 

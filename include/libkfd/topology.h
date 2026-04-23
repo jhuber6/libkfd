@@ -105,7 +105,9 @@ struct NodeProperties {
 };
 
 struct MemoryBank {
-  // HSA_HEAPTYPE: 0=system, 1=FB local, 2=LDS, 3=GPU scratch, 4=device SVM.
+  // HSA heap type from kfd_sysfs.h:
+  //   0 = System, 1 = FB public (large BAR), 2 = FB private (no large BAR),
+  //   3 = GDS,    4 = LDS,                   5 = GPU scratch.
   uint32_t heap_type;
   // Total size in bytes.
   uint64_t size_in_bytes;
