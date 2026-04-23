@@ -629,6 +629,9 @@ enum AtomicOp : uint32_t {
 
 // ATOMIC_MEM command field [11:8].
 //
+// Only ATOMIC_SINGLE_PASS works reliably across all ISAs. The GFX9 series can
+// stall forever on write confirm.
+//
 // References: MEC_ATOMIC_MEM_command_enum in pm4_cmds.h;
 //             PACKET3_ATOMIC_MEM__COMMAND__* in amdgpu/nvd.h
 enum AtomicCommand : uint32_t {

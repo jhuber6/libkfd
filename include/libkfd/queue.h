@@ -186,16 +186,16 @@ public:
     // wait until the necessary work and cache invalidation has completed. Then
     // we decrement the signal value and fire an event.
     uint32_t seq = __atomic_fetch_add(&next_eop_seq, 1, __ATOMIC_RELAXED) + 1;
+    uint32_t gfx = base.dev->gfx_version();
     uint32_t n = 0;
-    n += pm4::release_mem(buf + n, base.dev->gfx_version(), eop_seq.data(),
+    n += pm4::release_mem(buf + n, gfx, eop_seq.data(),
                           static_cast<uint64_t>(seq));
-    n += pm4::wait_reg_mem(buf + n, base.dev->gfx_version(), eop_seq.data(),
-                           Condition::GTE, seq);
+    n += pm4::wait_reg_mem(buf + n, gfx, eop_seq.data(), Condition::GTE, seq);
     n += pm4::atomic_mem(buf + n, pm4::ATOMIC_ADD_RTN_64, sig.fence_addr(),
-                         int64_t(-1), 0, pm4::ATOMIC_WAIT_CONFIRM,
+                         int64_t(-1), 0, pm4::ATOMIC_SINGLE_PASS,
                          pm4::POLICY_BYPASS);
-    n += pm4::release_mem(buf + n, base.dev->gfx_version(), sig.signal_addr(),
-                          sig.event_id(), sig.trigger_data());
+    n += pm4::release_mem(buf + n, gfx, sig.signal_addr(), sig.event_id(),
+                          sig.trigger_data());
     return base.submit(buf, n);
   }
 

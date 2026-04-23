@@ -47,19 +47,16 @@ public:
     return detail::elf::get_name(detail::elf::get_mach(gfx_version()));
   }
 
-  std::span<const MemoryBank> memory_banks() const {
-    return {info.memory_banks.data(), info.memory_banks.size()};
-  }
-
-  // True if the device has large BAR (resizable BAR / SAM) enabled, meaning
-  // VRAM is directly accessible from the CPU. The kernel reports VRAM as
-  // HSA_MEM_HEAP_TYPE_FB_PUBLIC (1) when large BAR is active and
-  // HSA_MEM_HEAP_TYPE_FB_PRIVATE (2) otherwise.
+  // True if the device has PCI-e large bar enabled amd VRAM is host accessible.
   bool vram_host_visible() const {
     for (size_t i = 0; i < info.memory_banks.size(); ++i)
       if (info.memory_banks[i].heap_type == 1)
         return true;
     return false;
+  }
+
+  std::span<const MemoryBank> memory_banks() const {
+    return {info.memory_banks.data(), info.memory_banks.size()};
   }
   std::span<const CacheInfo> caches() const {
     return {info.caches.data(), info.caches.size()};

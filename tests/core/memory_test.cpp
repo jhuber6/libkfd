@@ -43,10 +43,10 @@ TEST_CASE("Memory - VRAM host-visible alloc round-trip", "[memory]") {
   for (size_t i = 0; i < ctx->num_devices(); ++i) {
     auto dev = ctx->device(i);
     REQUIRE_RESULT(dev);
-    CAPTURE(i, (*dev)->gpu_id());
 
     if (!(*dev)->vram_host_visible())
       SKIP("Device does not support host-visible VRAM (large BAR disabled)");
+    CAPTURE(i, (*dev)->gpu_id());
 
     auto buf = kfd::Buffer::allocate(**dev, 4096, kfd::MemType::VRAM,
                                      kfd::MemFlags::WRITABLE |

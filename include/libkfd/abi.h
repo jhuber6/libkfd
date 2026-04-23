@@ -25,10 +25,11 @@ inline constexpr uint32_t GFX_VERSION_GFX942 = 90402;
 inline constexpr uint32_t GFX_VERSION_GFX950 = 90500;
 inline constexpr uint32_t GFX_VERSION_GFX10_1 = 100100;
 inline constexpr uint32_t GFX_VERSION_GFX11 = 110000;
-inline constexpr uint32_t GFX_VERSION_GFX1101 = 110001;
+inline constexpr uint32_t GFX_VERSION_GFX11_1 = 110001;
+inline constexpr uint32_t GFX_VERSION_GFX11_5 = 110005;
 inline constexpr uint32_t GFX_VERSION_GFX1151 = 110501;
 inline constexpr uint32_t GFX_VERSION_GFX12 = 120000;
-inline constexpr uint32_t GFX_VERSION_GFX1201 = 120001;
+inline constexpr uint32_t GFX_VERSION_GFX12_1 = 120001;
 
 // Decompose a gfx_target_version into its components.
 constexpr uint32_t gfx_version_major(uint32_t v) { return (v / 10000) % 100; }
