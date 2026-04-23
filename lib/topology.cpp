@@ -379,9 +379,7 @@ uint32_t vgpr_size_per_cu(uint32_t gfxv) {
   if (gfxv == abi::GFX_VERSION_GFX942 || gfxv == abi::GFX_VERSION_GFX9_A ||
       gfxv == abi::GFX_VERSION_GFX9_8 || gfxv == abi::GFX_VERSION_GFX950)
     return /*512 KiB=*/0x80000;
-  if (gfxv == abi::GFX_VERSION_GFX11 || gfxv == abi::GFX_VERSION_GFX1101 ||
-      gfxv == abi::GFX_VERSION_GFX1151 || gfxv == abi::GFX_VERSION_GFX12 ||
-      gfxv == abi::GFX_VERSION_GFX1201)
+  if (gfxv >= abi::GFX_VERSION_GFX11)
     return /*384 KiB=*/0x60000;
   return /*256 KiB=*/0x40000;
 }
@@ -420,7 +418,7 @@ std::pair<uint32_t, uint32_t> compute_cwsr_sizes(const NodeProperties &props) {
   ctl_stack_size = align_up(CWSR_HEADER_SIZE + ctl_stack_size,
                             static_cast<uint32_t>(page_size()));
 
-  if (abi::gfx_version_major(gfxv) == /*GFX10=*/100)
+  if (abi::gfx_version_major(gfxv) == /*GFX10=*/10)
     ctl_stack_size = detail::min(ctl_stack_size, /*28 KiB=*/0x7000u);
 
   return {ctl_stack_size + wg_data_size, ctl_stack_size};

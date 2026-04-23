@@ -437,10 +437,10 @@ inline uint32_t release_mem(uint32_t *out, uint32_t ordinal2, DataSel data,
   return RELEASE_MEM_DWORDS;
 }
 
-// Fence write: full flush, write-confirm, no interrupt.
+// Fence write, full flush, no interrupt.
 inline uint32_t release_mem(uint32_t *out, uint32_t gfx_version,
                             void *fence_addr, uint64_t fence_value) {
-  return release_mem(out, eop_fence_flush(gfx_version), DATA_64, DATA_CONFIRM,
+  return release_mem(out, eop_fence_flush(gfx_version), DATA_64, INT_NONE,
                      fence_addr, fence_value);
 }
 
@@ -857,9 +857,8 @@ inline uint32_t build_dispatch_setup(
   const uint32_t rsrc[] = {kd.compute_pgm_rsrc1, rsrc2};
   written += set_sh_reg(out + written, regs::COMPUTE_PGM_RSRC1, rsrc, 2);
 
-  if (kd.compute_pgm_rsrc3 != 0)
-    written += set_sh_reg(out + written, regs::COMPUTE_PGM_RSRC3,
-                          kd.compute_pgm_rsrc3);
+  written +=
+      set_sh_reg(out + written, regs::COMPUTE_PGM_RSRC3, kd.compute_pgm_rsrc3);
 
   // Occupancy limits and SIMD masks. TMPRING_SIZE is set separately via
   // set_scratch_base so the watcher IB can override it after a resize.
