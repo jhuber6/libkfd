@@ -393,7 +393,8 @@ std::pair<uint32_t, uint32_t> compute_cwsr_sizes(const NodeProperties &props) {
   constexpr uint32_t CWSR_HEADER_SIZE = sizeof(abi::CwsrHeader);
 
   uint32_t num_xcc = props.num_xcc ? props.num_xcc : 1;
-  uint32_t cu_num = props.simd_count / props.simd_per_cu / num_xcc;
+  uint32_t simd_per_cu = props.simd_per_cu ? props.simd_per_cu : 1;
+  uint32_t cu_num = props.simd_count / simd_per_cu / num_xcc;
 
   uint32_t wave_num;
   if (gfxv < abi::GFX_VERSION_GFX10_1) {

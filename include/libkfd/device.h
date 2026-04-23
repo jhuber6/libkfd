@@ -65,6 +65,9 @@ public:
     return {info.io_links.data(), info.io_links.size()};
   }
 
+  // Checks if an ELF image can be loaded onto this device.
+  bool loadable(std::span<const std::byte> image) const;
+
   // Lazily mmap the doorbell page on first call, then return a pointer to the
   // specific slot within it. All queues on this device share the same page.
   std::expected<volatile uint64_t *, Error> doorbell(uint64_t raw_offset);

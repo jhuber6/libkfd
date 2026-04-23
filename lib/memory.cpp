@@ -165,10 +165,8 @@ std::expected<void, Error> Buffer::map(std::span<Device *const> targets) {
   for (auto *d : targets)
     KFD_CHECK(ids.push_back(d->gpu_id()));
 
-  {
-    LockGuard guard(*mtx);
-    KFD_CHECK(mapped_ids.reserve(mapped_ids.size() + ids.size()));
-  }
+  LockGuard guard(*mtx);
+  KFD_CHECK(mapped_ids.reserve(mapped_ids.size() + ids.size()));
 
   ioctl::kfd::map_memory_to_gpu_args args{
       .handle = handle,
@@ -179,7 +177,6 @@ std::expected<void, Error> Buffer::map(std::span<Device *const> targets) {
       !r)
     return r;
 
-  LockGuard guard(*mtx);
   for (auto id : ids) {
     bool found = false;
     for (size_t i = 0; i < mapped_ids.size(); ++i)
@@ -209,6 +206,8 @@ std::expected<void, Error> Buffer::unmap(std::span<Device *const> targets) {
   for (auto *d : targets)
     KFD_CHECK(ids.push_back(d->gpu_id()));
 
+  LockGuard guard(*mtx);
+
   ioctl::kfd::unmap_memory_from_gpu_args args{
       .handle = handle,
       .device_ids_array_ptr = reinterpret_cast<uintptr_t>(ids.data()),
@@ -219,7 +218,6 @@ std::expected<void, Error> Buffer::unmap(std::span<Device *const> targets) {
       !r)
     return r;
 
-  LockGuard guard(*mtx);
   for (auto id : ids) {
     for (size_t i = 0; i < mapped_ids.size(); ++i) {
       if (mapped_ids[i] == id) {

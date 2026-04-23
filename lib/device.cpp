@@ -315,6 +315,20 @@ Device::Device(Device &&other)
   trap_tma.owner = this;
 }
 
+bool Device::loadable(std::span<const std::byte> image) const {
+  auto elf = elf::ELF64LE::create(image);
+  if (!elf || elf->header().e_machine != elf::EM_AMDGPU)
+    return false;
+  unsigned abi = elf->header().e_ident[elf::EI_ABIVERSION];
+  if (abi < elf::ELFABIVERSION_AMDGPU_HSA_V5)
+    return false;
+  bool sramecc =
+      properties().capability & NodeProperties::NODE_CAP_SRAM_EDCSUPPORTED;
+  bool xnack = context().xnack_enabled();
+  return elf::is_compatible(elf->header().e_flags, gfx_version(), xnack,
+                            sramecc);
+}
+
 static constexpr size_t DOORBELL_PAGE_SIZE = 8192;
 
 std::expected<volatile uint64_t *, Error>

@@ -38,7 +38,15 @@ std::expected<LaunchFixture, kfd::Error> make_fixture(kfd::Device &dev) {
 void dispatch_nop(LaunchFixture &fix, kfd::Dim3 grid = {.x = 1},
                   kfd::Dim3 block = {.x = 64}) {
   kfd::DispatchConfig cfg{.grid = grid, .block = block};
-  REQUIRE_RESULT(fix.compute.dispatch(fix.nop, cfg, fix.nop_kernarg));
+  bool is_default = grid.x == 1 && grid.y == 1 && grid.z == 1 &&
+                    block.x == 64 && block.y == 1 && block.z == 1;
+  if (is_default) {
+    REQUIRE_RESULT(fix.compute.dispatch(fix.nop, cfg, fix.nop_kernarg));
+  } else {
+    auto ka = fix.nop.make_kernargs(*fix.gpu, cfg);
+    REQUIRE_RESULT(ka);
+    REQUIRE_RESULT(fix.compute.dispatch(fix.nop, cfg, *ka));
+  }
 }
 
 } // namespace

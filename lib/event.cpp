@@ -180,9 +180,8 @@ std::expected<size_t, Error> wait_any(std::span<Event *> events,
     events[i]->event_data = make_event_data(eds[i]);
 
   for (size_t i = 0; i < events.size(); ++i) {
-    auto &mf = events[i]->data().memory_fault;
-    auto &hw = events[i]->data().hw_exception;
-    if (mf.gpu_id || hw.gpu_id)
+    if (eds[i].signal_event_data.last_event_age ||
+        eds[i].hw_exception_data.gpu_id)
       return i;
   }
   return 0;

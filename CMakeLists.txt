@@ -60,7 +60,7 @@ set(LIBKFD_GPU_ALL_ARCHS
 set(LIBKFD_GPU_ARCHS "")
 foreach(arch IN LISTS LIBKFD_GPU_ALL_ARCHS)
   try_compile(_arch_ok
-    SOURCE_FROM_CONTENT test_${arg}.c "void _start(void) {}"
+    SOURCE_FROM_CONTENT test_${arch}.c "void _start(void) {}"
     COMPILE_DEFINITIONS --target=amdgcn--amdhsa -mcpu=${arch} -nogpulib
     LINK_OPTIONS --target=amdgcn--amdhsa -mcpu=${arch}
   )
