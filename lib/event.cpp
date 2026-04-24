@@ -9,6 +9,7 @@
 #include "ioctl.h"
 #include "libkfd/context.h"
 #include "libkfd/detail/small_vector.h"
+#include "libkfd/detail/utility.h"
 
 #include <cerrno>
 #include <cstring>
@@ -97,7 +98,8 @@ Event &Event::operator=(Event &&other) {
   return *this;
 }
 
-std::expected<void, Error> Event::wait(uint32_t timeout_ms) {
+std::expected<void, Error> Event::wait(uint64_t timeout_ns) {
+  uint32_t timeout_ms = static_cast<uint32_t>(timeout_ns / 1'000'000);
   ioctl::kfd::event_data ed{};
   ed.event_id = id;
 
@@ -109,8 +111,7 @@ std::expected<void, Error> Event::wait(uint32_t timeout_ms) {
   };
   KFD_CHECK(ioctl::call<ioctl::kfd::WAIT_EVENTS>(fd, args));
   if (args.wait_result == KFD_IOC_WAIT_RESULT_TIMEOUT)
-    return kfd::unexpected(ETIMEDOUT, "event %u wait timed out after %u ms", id,
-                           timeout_ms);
+    return kfd::unexpected(ETIMEDOUT, "event %u wait timed out", id);
   if (args.wait_result != KFD_IOC_WAIT_RESULT_COMPLETE)
     return kfd::unexpected(EIO, "event %u wait failed (wait_result=%u)", id,
                            args.wait_result);
@@ -132,7 +133,8 @@ namespace {
 
 std::expected<detail::SmallVector<ioctl::kfd::event_data, 8>, Error>
 do_wait_events(std::span<Event *> events, bool wait_for_all,
-               uint32_t timeout_ms) {
+               uint64_t timeout_ns) {
+  uint32_t timeout_ms = static_cast<uint32_t>(timeout_ns / 1'000'000);
   auto n = static_cast<uint32_t>(events.size());
   detail::SmallVector<ioctl::kfd::event_data, 8> eds;
   KFD_CHECK(eds.resize(n));
@@ -161,21 +163,21 @@ do_wait_events(std::span<Event *> events, bool wait_for_all,
 } // namespace
 
 std::expected<void, Error> wait_all(std::span<Event *> events,
-                                    uint32_t timeout_ms) {
+                                    uint64_t timeout_ns) {
   if (events.empty())
     return {};
-  auto eds = KFD_TRY(do_wait_events(events, true, timeout_ms));
+  auto eds = KFD_TRY(do_wait_events(events, true, timeout_ns));
   for (uint32_t i = 0; i < static_cast<uint32_t>(events.size()); ++i)
     events[i]->event_data = make_event_data(eds[i]);
   return {};
 }
 
 std::expected<size_t, Error> wait_any(std::span<Event *> events,
-                                      uint32_t timeout_ms) {
+                                      uint64_t timeout_ns) {
   if (events.empty())
     return kfd::unexpected(EINVAL, "wait_any called with no events");
 
-  auto eds = KFD_TRY(do_wait_events(events, false, timeout_ms));
+  auto eds = KFD_TRY(do_wait_events(events, false, timeout_ns));
   for (uint32_t i = 0; i < static_cast<uint32_t>(events.size()); ++i)
     events[i]->event_data = make_event_data(eds[i]);
 

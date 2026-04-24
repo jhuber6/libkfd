@@ -35,6 +35,18 @@ inline void spin_hint() {
 #endif
 }
 
+inline void spin_wait(uint64_t *addr, uint64_t last_value,
+                      uint32_t timeout_cycles = 50'000) {
+#if __has_builtin(__builtin_ia32_monitorx)
+  __builtin_ia32_monitorx(addr, 0, 0);
+  if (__atomic_load_n(addr, __ATOMIC_RELAXED) != last_value)
+    return;
+  __builtin_ia32_mwaitx(/*ENABLE_TIMEOUT=*/2, 0, timeout_cycles);
+#else
+  spin_hint();
+#endif
+}
+
 inline void memory_barrier() {
 #if __has_builtin(__builtin_ia32_sfence)
   __builtin_ia32_sfence();

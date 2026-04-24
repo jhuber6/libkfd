@@ -76,7 +76,7 @@ public:
   int kfd_fd() const;
 
   // Block until receiving the signal or timeout expires.
-  std::expected<void, Error> wait(uint32_t timeout_ms = UINT32_MAX);
+  std::expected<void, Error> wait(uint64_t timeout_ns = UINT64_MAX);
 
   // Reset to unsignaled state so the event can be waited on again.
   std::expected<void, Error> reset();
@@ -92,8 +92,8 @@ public:
 
 private:
   friend class Context;
-  friend std::expected<void, Error> wait_all(std::span<Event *>, uint32_t);
-  friend std::expected<size_t, Error> wait_any(std::span<Event *>, uint32_t);
+  friend std::expected<void, Error> wait_all(std::span<Event *>, uint64_t);
+  friend std::expected<size_t, Error> wait_any(std::span<Event *>, uint64_t);
 
   Event(int fd, uint32_t id, uint32_t trigger, uint32_t slot_idx,
         void *slot_addr)
@@ -109,10 +109,10 @@ private:
 };
 
 std::expected<void, Error> wait_all(std::span<Event *> events,
-                                    uint32_t timeout_ms = UINT32_MAX);
+                                    uint64_t timeout_ns = UINT64_MAX);
 
 std::expected<size_t, Error> wait_any(std::span<Event *> events,
-                                      uint32_t timeout_ms = UINT32_MAX);
+                                      uint64_t timeout_ns = UINT64_MAX);
 
 } // namespace kfd
 

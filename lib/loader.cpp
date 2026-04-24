@@ -34,8 +34,9 @@ void Kernel::fill(Buffer &buf, std::span<const std::byte> explicit_args,
                   const DispatchConfig &cfg) const {
   size_t total = abi::kernarg_alloc_size(kd->kernarg_size);
   std::memset(buf.data(), 0, total);
-  std::memcpy(buf.data(), explicit_args.data(),
-              detail::min(explicit_args.size(), total));
+  if (!explicit_args.empty())
+    std::memcpy(buf.data(), explicit_args.data(),
+                detail::min(explicit_args.size(), total));
   abi::fill_implicit_args(buf.data(), explicit_args.size(), *kd, cfg);
 }
 

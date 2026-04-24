@@ -118,7 +118,7 @@ private:
   friend class ComputeQueue;
 
   Buffer(uint64_t h, size_t sz, detail::MappedRegion mapping,
-         detail::SmallVector<uint32_t, 2> mapped_ids, Device *owner,
+         detail::SmallVector<uint32_t, 2> mapped_ids, Device *dev,
          detail::Box<detail::Mutex> mtx);
 
   void destroy();

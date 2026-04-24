@@ -21,7 +21,7 @@ TEST_CASE("Event - CPU signal + wait round-trip", "[event]") {
   REQUIRE_RESULT(ev);
 
   REQUIRE_RESULT(ev->signal());
-  REQUIRE_RESULT(ev->wait(1000));
+  REQUIRE_RESULT(ev->wait(1'000'000'000));
 }
 
 TEST_CASE("Event - wait times out when unsignaled", "[event]") {
@@ -30,7 +30,7 @@ TEST_CASE("Event - wait times out when unsignaled", "[event]") {
   auto ev = kfd::Event::create(ctx);
   REQUIRE_RESULT(ev);
 
-  auto r = ev->wait(10);
+  auto r = ev->wait(10'000'000);
   CHECK(!r.has_value());
 }
 
@@ -172,5 +172,5 @@ TEST_CASE("Event - move semantics", "[event]") {
   CHECK(moved.trigger_data() == orig_trigger);
 
   REQUIRE_RESULT(moved.signal());
-  REQUIRE_RESULT(moved.wait(1000));
+  REQUIRE_RESULT(moved.wait(1'000'000'000));
 }

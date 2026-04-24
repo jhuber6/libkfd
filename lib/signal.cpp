@@ -62,13 +62,13 @@ bool check_all(std::span<Signal *> signals, Condition cond, uint64_t value) {
 }
 
 std::expected<void, Error> event_wait(std::span<Signal *> signals,
-                                      bool wait_for_all, uint32_t timeout_ms) {
+                                      bool wait_for_all, uint64_t timeout_ns) {
   detail::SmallVector<Event *, 8> events;
   for (auto *s : signals)
     KFD_CHECK(events.push_back(s->event_ptr()));
   if (wait_for_all)
-    return kfd::wait_all({events.data(), events.size()}, timeout_ms);
-  auto r = kfd::wait_any({events.data(), events.size()}, timeout_ms);
+    return kfd::wait_all({events.data(), events.size()}, timeout_ns);
+  auto r = kfd::wait_any({events.data(), events.size()}, timeout_ns);
   if (!r)
     return kfd::unexpected(r.error());
   return {};
@@ -130,7 +130,12 @@ std::expected<void, Error> wait_all(std::span<Signal *> signals, Condition cond,
       return {};
     if (now_ns() >= spin_deadline)
       break;
-    detail::spin_hint();
+    if (signals.size() == 1)
+      detail::spin_wait(
+          signals.front()->fence_addr(),
+          __atomic_load_n(signals.front()->fence_addr(), __ATOMIC_RELAXED));
+    else
+      detail::spin_hint();
   }
 
   for (;;) {
@@ -139,11 +144,7 @@ std::expected<void, Error> wait_all(std::span<Signal *> signals, Condition cond,
     uint64_t now = now_ns();
     if (now >= abs_deadline)
       return kfd::unexpected(ETIMEDOUT, "signal wait timed out");
-    uint64_t remaining_ms = (abs_deadline - now + 999'999) / 1'000'000;
-    uint32_t wait_ms = remaining_ms > UINT32_MAX
-                           ? UINT32_MAX
-                           : static_cast<uint32_t>(remaining_ms);
-    if (auto r = event_wait(signals, true, wait_ms); !r) {
+    if (auto r = event_wait(signals, true, abs_deadline - now); !r) {
       if (r.error().code == ETIMEDOUT)
         continue;
       return r;
@@ -177,11 +178,7 @@ std::expected<size_t, Error> wait_any(std::span<Signal *> signals,
     uint64_t now = now_ns();
     if (now >= abs_deadline)
       return kfd::unexpected(ETIMEDOUT, "signal wait timed out");
-    uint64_t remaining_ms = (abs_deadline - now + 999'999) / 1'000'000;
-    uint32_t wait_ms = remaining_ms > UINT32_MAX
-                           ? UINT32_MAX
-                           : static_cast<uint32_t>(remaining_ms);
-    if (auto r = event_wait(signals, false, wait_ms); !r) {
+    if (auto r = event_wait(signals, false, abs_deadline - now); !r) {
       if (r.error().code == ETIMEDOUT)
         continue;
       return kfd::unexpected(r.error());
