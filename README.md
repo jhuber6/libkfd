@@ -125,7 +125,8 @@ KFD_EXPECT(buf.map(dev));
 
 // Set up dispatch dimensions and build the kernarg buffer.
 kfd::DispatchConfig cfg{.grid = {.x = num_blocks}, .block = {.x = 256}};
-auto kernarg = KFD_EXPECT(kernel.make_kernargs(dev, my_args, cfg));
+auto kernarg = KFD_EXPECT(kernel.alloc());
+kernel.fill(kernarg, my_args, cfg);
 
 // Dispatch and wait for completion.
 auto sig = KFD_EXPECT(kfd::Signal::create(ctx));

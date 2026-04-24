@@ -38,15 +38,14 @@ using namespace kfd::detail;
 namespace kfd {
 
 Buffer::Buffer(uint64_t h, size_t sz, MappedRegion mapping,
-               SmallVector<uint32_t, 2> mapped_ids, Device *owner,
-               Box<Mutex> mtx)
+               SmallVector<uint32_t, 2> mapped_ids, Device *dev, Box<Mutex> mtx)
     : len(sz), handle(h), mapping(std::move(mapping)), mtx(std::move(mtx)),
-      mapped_ids(std::move(mapped_ids)), owner(owner) {}
+      mapped_ids(std::move(mapped_ids)), dev(dev) {}
 
 void Buffer::destroy() {
   if (handle == 0)
     return;
-  Context &ctx = owner->context();
+  Context &ctx = dev->context();
   LockGuard guard(*mtx);
   if (!mapped_ids.empty()) {
     ioctl::kfd::unmap_memory_from_gpu_args args{
@@ -73,7 +72,7 @@ Buffer::Buffer(Buffer &&other)
     : len(std::exchange(other.len, 0)), handle(std::exchange(other.handle, 0)),
       mapping(std::move(other.mapping)), mtx(std::move(other.mtx)),
       mapped_ids(std::move(other.mapped_ids)),
-      owner(std::exchange(other.owner, nullptr)) {}
+      dev(std::exchange(other.dev, nullptr)) {}
 
 Buffer &Buffer::operator=(Buffer &&other) {
   if (this != &other) {
@@ -83,7 +82,7 @@ Buffer &Buffer::operator=(Buffer &&other) {
     mapping = std::move(other.mapping);
     mtx = std::move(other.mtx);
     mapped_ids = std::move(other.mapped_ids);
-    owner = std::exchange(other.owner, nullptr);
+    dev = std::exchange(other.dev, nullptr);
   }
   return *this;
 }
@@ -159,7 +158,7 @@ std::expected<void, Error> Buffer::map(std::span<Device *const> targets) {
   if (!*this)
     return kfd::unexpected(EINVAL, "map called on null buffer");
 
-  Context &ctx = owner->context();
+  Context &ctx = dev->context();
 
   SmallVector<uint32_t, 8> ids;
   for (auto *d : targets)
@@ -200,7 +199,7 @@ std::expected<void, Error> Buffer::unmap(std::span<Device *const> targets) {
   if (!*this)
     return kfd::unexpected(EINVAL, "unmap called on null buffer");
 
-  Context &ctx = owner->context();
+  Context &ctx = dev->context();
 
   SmallVector<uint32_t, 8> ids;
   for (auto *d : targets)
@@ -235,7 +234,7 @@ std::expected<DMABuffer, Error> DMABuffer::create(Buffer &buf, uint32_t flags) {
   if (!buf)
     return kfd::unexpected(EINVAL, "export_dmabuf called on null buffer");
 
-  Context &ctx = buf.owner->context();
+  Context &ctx = buf.dev->context();
 
   ioctl::kfd::export_dmabuf_args args{
       .handle = buf.handle,

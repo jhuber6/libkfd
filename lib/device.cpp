@@ -310,9 +310,9 @@ Device::Device(Device &&other)
       trap_tba(std::move(other.trap_tba)), trap_tma(std::move(other.trap_tma)),
       scratch_reservation(std::move(other.scratch_reservation)),
       scratch_allocator(std::move(other.scratch_allocator)) {
-  doorbells.owner = this;
-  trap_tba.owner = this;
-  trap_tma.owner = this;
+  doorbells.dev = this;
+  trap_tba.dev = this;
+  trap_tma.dev = this;
 }
 
 bool Device::loadable(std::span<const std::byte> image) const {

@@ -34,8 +34,9 @@ TEST_CASE("Dispatch - NOP kernel completes", "[device][dispatch]") {
           .grid = {.x = 1},
           .block = {.x = 64},
       };
-      auto kernarg = kernel->make_kernargs(*fix->gpu, cfg);
+      auto kernarg = kernel->alloc();
       REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, cfg);
 
       auto sig = kfd::Signal::create(ctx);
       REQUIRE_RESULT(sig);
@@ -74,8 +75,9 @@ TEST_CASE("Dispatch - single-thread store writes sentinel",
           .grid = {.x = 1},
           .block = {.x = 64},
       };
-      auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+      auto kernarg = kernel->alloc();
       REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, args, cfg);
 
       auto sig = kfd::Signal::create(ctx);
       REQUIRE_RESULT(sig);
@@ -122,8 +124,9 @@ TEST_CASE("Dispatch - fill_local_ids writes correct thread IDs",
           .grid = {.x = 1},
           .block = {.x = THREADS},
       };
-      auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+      auto kernarg = kernel->alloc();
       REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, args, cfg);
 
       auto sig = kfd::Signal::create(ctx);
       REQUIRE_RESULT(sig);
@@ -173,8 +176,9 @@ TEST_CASE("Dispatch - fill_wg_ids across multiple workgroups",
           .grid = {.x = NUM_WG},
           .block = {.x = THREADS},
       };
-      auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+      auto kernarg = kernel->alloc();
       REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, args, cfg);
 
       auto sig = kfd::Signal::create(ctx);
       REQUIRE_RESULT(sig);
@@ -210,8 +214,9 @@ void run_check_dims(DeviceFixture &fix, kfd::Dim3 grid, kfd::Dim3 block) {
   Args args{.out = static_cast<unsigned *>(out.data())};
 
   kfd::DispatchConfig cfg{.grid = grid, .block = block};
-  auto kernarg = kernel->make_kernargs(*fix.gpu, args, cfg);
+  auto kernarg = kernel->alloc();
   REQUIRE_RESULT(kernarg);
+  kernel->fill(*kernarg, args, cfg);
 
   auto &ctx = fix.gpu->context();
   auto sig = kfd::Signal::create(ctx);

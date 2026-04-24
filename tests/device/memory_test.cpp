@@ -42,8 +42,9 @@ TEST_CASE("Memory - scratch_sum writes correct value", "[device][memory]") {
           .grid = {.x = 1},
           .block = {.x = 64},
       };
-      auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+      auto kernarg = kernel->alloc();
       REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, args, cfg);
 
       auto sig = kfd::Signal::create(ctx);
       REQUIRE_RESULT(sig);
@@ -91,8 +92,9 @@ TEST_CASE("Memory - lds_reduce produces correct sum", "[device][memory]") {
           .grid = {.x = NUM_WG},
           .block = {.x = THREADS},
       };
-      auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+      auto kernarg = kernel->alloc();
       REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, args, cfg);
 
       auto sig = kfd::Signal::create(ctx);
       REQUIRE_RESULT(sig);
@@ -145,8 +147,9 @@ TEST_CASE("Memory - dynamic_lds_fill with runtime-sized LDS",
           .block = {.x = THREADS},
           .dynamic_lds = THREADS * sizeof(unsigned),
       };
-      auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+      auto kernarg = kernel->alloc();
       REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, args, cfg);
 
       auto sig = kfd::Signal::create(ctx);
       REQUIRE_RESULT(sig);
@@ -192,8 +195,9 @@ TEST_CASE("Memory - dynamic_stack with non-inlined call", "[device][memory]") {
           .grid = {.x = 1},
           .block = {.x = 64},
       };
-      auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+      auto kernarg = kernel->alloc();
       REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, args, cfg);
 
       auto sig = kfd::Signal::create(ctx);
       REQUIRE_RESULT(sig);

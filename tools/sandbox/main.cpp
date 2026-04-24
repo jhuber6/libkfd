@@ -109,7 +109,8 @@ int main(int argc, char **argv) {
   constexpr uint32_t BLOCK = 256;
   uint32_t grid = (static_cast<uint32_t>(n) + BLOCK - 1) / BLOCK;
   kfd::DispatchConfig cfg{.grid = {.x = grid}, .block = {.x = BLOCK}};
-  auto kernarg = KFD_EXPECT(kernel.make_kernargs(dev, args, cfg));
+  auto kernarg = KFD_EXPECT(kernel.alloc());
+  kernel.fill(kernarg, args, cfg);
 
   // Dispatch and wait for completion via a signal.
   auto sig = KFD_EXPECT(kfd::Signal::create(ctx));

@@ -63,8 +63,9 @@ TEST_CASE("Sync - SDMA fill then compute dispatch", "[device][sync]") {
       Args args{static_cast<unsigned *>(out.data()),
                 static_cast<const unsigned *>(in.data())};
       kfd::DispatchConfig cfg{.grid = {.x = 1}, .block = {.x = THREADS}};
-      auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+      auto kernarg = kernel->alloc();
       REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, args, cfg);
 
       REQUIRE_RESULT(fix->compute.dispatch(*kernel, cfg, *kernarg));
       REQUIRE_RESULT(fix->compute.signal(*done));
@@ -115,8 +116,9 @@ TEST_CASE("Sync - compute dispatch then SDMA readback", "[device][sync]") {
       Args args{static_cast<unsigned *>(out.data()),
                 static_cast<const unsigned *>(in.data())};
       kfd::DispatchConfig cfg{.grid = {.x = 1}, .block = {.x = THREADS}};
-      auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+      auto kernarg = kernel->alloc();
       REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, args, cfg);
 
       REQUIRE_RESULT(fix->compute.dispatch(*kernel, cfg, *kernarg));
       REQUIRE_RESULT(fix->compute.signal(*compute_done));
@@ -175,8 +177,9 @@ TEST_CASE("Sync - SDMA to compute to SDMA pipeline", "[device][sync]") {
       Args args{static_cast<unsigned *>(out.data()),
                 static_cast<const unsigned *>(in.data())};
       kfd::DispatchConfig cfg{.grid = {.x = 1}, .block = {.x = THREADS}};
-      auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+      auto kernarg = kernel->alloc();
       REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, args, cfg);
       REQUIRE_RESULT(fix->compute.dispatch(*kernel, cfg, *kernarg));
       REQUIRE_RESULT(fix->compute.signal(*sig));
 
@@ -238,8 +241,9 @@ TEST_CASE("Sync - two SDMA producers join before compute", "[device][sync]") {
                 static_cast<const unsigned *>(buf_a.data()),
                 static_cast<const unsigned *>(buf_b.data())};
       kfd::DispatchConfig cfg{.grid = {.x = 1}, .block = {.x = THREADS}};
-      auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+      auto kernarg = kernel->alloc();
       REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, args, cfg);
 
       REQUIRE_RESULT(fix->compute.dispatch(*kernel, cfg, *kernarg));
       REQUIRE_RESULT(fix->compute.signal(*done));
@@ -298,8 +302,9 @@ TEST_CASE("Sync - repeated pipeline iterations", "[device][sync][stress]") {
         Args args{static_cast<unsigned *>(out.data()),
                   static_cast<const unsigned *>(in.data())};
         kfd::DispatchConfig cfg{.grid = {.x = 1}, .block = {.x = THREADS}};
-        auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+        auto kernarg = kernel->alloc();
         REQUIRE_RESULT(kernarg);
+        kernel->fill(*kernarg, args, cfg);
 
         REQUIRE_RESULT(fix->compute.dispatch(*kernel, cfg, *kernarg));
         REQUIRE_RESULT(fix->compute.signal(*done));

@@ -31,7 +31,8 @@ dispatch_with_scratch(kfd::Device &dev, kfd::ComputeQueue &compute,
       .block = {.x = 64},
       .private_segment_size = scratch_bytes,
   };
-  auto kernarg = KFD_TRY(nop.make_kernargs(dev, cfg));
+  auto kernarg = KFD_TRY(nop.alloc());
+  nop.fill(kernarg, cfg);
 
   auto sig = KFD_TRY(kfd::Signal::create(dev.context()));
 
@@ -199,8 +200,9 @@ TEST_CASE("Scratch stress - correctness after progressive resize",
             .block = {.x = VERIFY_THREADS},
             .private_segment_size = pss,
         };
-        auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+        auto kernarg = kernel->alloc();
         REQUIRE_RESULT(kernarg);
+        kernel->fill(*kernarg, args, cfg);
 
         auto sig = kfd::Signal::create(ctx);
         REQUIRE_RESULT(sig);
@@ -254,8 +256,9 @@ TEST_CASE("Scratch stress - rapid serial resize bursts", "[device][scratch]") {
             .block = {.x = VERIFY_THREADS},
             .private_segment_size = sizes[i],
         };
-        auto kernarg = kernel->make_kernargs(*fix->gpu, args, cfg);
+        auto kernarg = kernel->alloc();
         REQUIRE_RESULT(kernarg);
+        kernel->fill(*kernarg, args, cfg);
         REQUIRE_RESULT(fix->compute.dispatch(*kernel, cfg, *kernarg));
         kernargs.push_back(std::move(*kernarg));
       }
@@ -309,15 +312,16 @@ TEST_CASE("Scratch stress - interleaved scratch and non-scratch",
             .block = {.x = VERIFY_THREADS},
             .private_segment_size = 256 + round * 256,
         };
-        auto ka_scratch =
-            scratch_kernel->make_kernargs(*fix->gpu, args, scratch_cfg);
+        auto ka_scratch = scratch_kernel->alloc();
         REQUIRE_RESULT(ka_scratch);
+        scratch_kernel->fill(*ka_scratch, args, scratch_cfg);
         REQUIRE_RESULT(
             fix->compute.dispatch(*scratch_kernel, scratch_cfg, *ka_scratch));
 
         kfd::DispatchConfig nop_cfg{.grid = {.x = 1}, .block = {.x = 1}};
-        auto ka_nop = nop_kernel->make_kernargs(*fix->gpu, nop_cfg);
+        auto ka_nop = nop_kernel->alloc();
         REQUIRE_RESULT(ka_nop);
+        nop_kernel->fill(*ka_nop, nop_cfg);
         REQUIRE_RESULT(fix->compute.dispatch(*nop_kernel, nop_cfg, *ka_nop));
 
         auto sig = kfd::Signal::create(ctx);

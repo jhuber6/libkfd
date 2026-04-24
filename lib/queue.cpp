@@ -672,7 +672,7 @@ std::expected<ComputeQueue, Error> ComputeQueue::create(Device &dev,
 std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
                                                   const DispatchConfig &cfg,
                                                   const Buffer &kernarg) {
-  const abi::KernelDescriptor &kd = *kernel.descriptor;
+  const abi::KernelDescriptor &kd = kernel.descriptor();
   if (kd.kernarg_preload & abi::KERNARG_PRELOAD_LENGTH_MASK)
     return unexpected(ENOTSUP, "kernarg preload not yet supported");
 
@@ -729,7 +729,7 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
   void *va = __atomic_load_n(&sctx->scratch_va, __ATOMIC_RELAXED);
   uint32_t tmpring = __atomic_load_n(&sctx->scratch_tmpring, __ATOMIC_RELAXED);
   auto n = pm4::build_dispatch_setup(
-      buf, base.dev->gfx_version(), kd, kernel.address, cfg.grid, cfg.block,
+      buf, base.dev->gfx_version(), kd, kernel.address(), cfg.grid, cfg.block,
       kernarg.data(), dispatch_pkt_addr, va, tmpring, cfg.dynamic_lds,
       private_segment_size);
 

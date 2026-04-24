@@ -34,7 +34,8 @@ make_fixture(kfd::Device &dev, kfd::Dim3 grid = {.x = 1},
   auto base = KFD_TRY(make_device_fixture(dev, dispatch_kernels));
   auto nop = KFD_TRY(base.exe.kernel("nop.kd"));
   kfd::DispatchConfig cfg{.grid = grid, .block = block};
-  auto ka = KFD_TRY(nop.make_kernargs(*base.gpu, cfg));
+  auto ka = KFD_TRY(nop.alloc());
+  nop.fill(ka, cfg);
   return SignalFixture{std::move(base), std::move(nop), std::move(ka), cfg};
 }
 
@@ -524,8 +525,9 @@ TEST_CASE("Signal stress - two queues with NOP dispatches and shared signal",
       REQUIRE_RESULT(compute2);
 
       kfd::DispatchConfig cfg{.grid = {.x = 4}, .block = {.x = 64}};
-      auto kernarg = fix->nop.make_kernargs(*fix->gpu, cfg);
+      auto kernarg = fix->nop.alloc();
       REQUIRE_RESULT(kernarg);
+      fix->nop.fill(*kernarg, cfg);
 
       auto sig = kfd::Signal::create(ctx, 2);
       REQUIRE_RESULT(sig);
@@ -557,8 +559,9 @@ TEST_CASE("Signal stress - repeated two-queue shared signal with dispatches",
       REQUIRE_RESULT(compute2);
 
       kfd::DispatchConfig cfg{.grid = {.x = 4}, .block = {.x = 64}};
-      auto kernarg = fix->nop.make_kernargs(*fix->gpu, cfg);
+      auto kernarg = fix->nop.alloc();
       REQUIRE_RESULT(kernarg);
+      fix->nop.fill(*kernarg, cfg);
 
       auto sig = kfd::Signal::create(ctx, 2);
       REQUIRE_RESULT(sig);
@@ -597,8 +600,9 @@ TEST_CASE("Signal stress - threaded dispatch+signal on shared queue",
       constexpr unsigned ITERS = 30;
 
       kfd::DispatchConfig cfg{.grid = {.x = 1}, .block = {.x = 64}};
-      auto kernarg = fix->nop.make_kernargs(*fix->gpu, cfg);
+      auto kernarg = fix->nop.alloc();
       REQUIRE_RESULT(kernarg);
+      fix->nop.fill(*kernarg, cfg);
 
       std::vector<kfd::Signal> signals;
       signals.reserve(N_THREADS);
@@ -642,8 +646,9 @@ TEST_CASE("Signal stress - threaded counting signal from shared queue",
       constexpr unsigned N_THREADS = 4;
 
       kfd::DispatchConfig cfg{.grid = {.x = 1}, .block = {.x = 64}};
-      auto kernarg = fix->nop.make_kernargs(*fix->gpu, cfg);
+      auto kernarg = fix->nop.alloc();
       REQUIRE_RESULT(kernarg);
+      fix->nop.fill(*kernarg, cfg);
 
       auto sig = kfd::Signal::create(ctx, N_THREADS);
       REQUIRE_RESULT(sig);

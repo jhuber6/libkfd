@@ -19,21 +19,24 @@ using namespace kfd::detail;
 
 namespace kfd {
 
-std::expected<Buffer, Error>
-Kernel::make_kernargs(Device &dev, std::span<const std::byte> explicit_args,
-                      const DispatchConfig &cfg) const {
-  size_t total = abi::kernarg_alloc_size(descriptor->kernarg_size);
-  auto buf = KFD_TRY(Buffer::allocate(
-      dev, align_up(total, page_size()), MemType::GTT,
-      MemFlags::WRITABLE | MemFlags::HOST_ACCESS | MemFlags::UNCACHED));
-  KFD_CHECK(buf.map(dev));
-
-  std::memset(buf.data(), 0, total);
-  size_t copy_size = detail::min(explicit_args.size(), total);
-  std::memcpy(buf.data(), explicit_args.data(), copy_size);
-  abi::fill_implicit_args(buf.data(), explicit_args.size(), *descriptor, cfg);
+std::expected<Buffer, Error> Kernel::alloc() const {
+  size_t total = abi::kernarg_alloc_size(kd->kernarg_size);
+  auto buf =
+      KFD_TRY(Buffer::allocate(*dev, align_up(total, page_size()), MemType::GTT,
+                               MemFlags::WRITABLE | MemFlags::COHERENT |
+                                   MemFlags::HOST_ACCESS | MemFlags::UNCACHED));
+  KFD_CHECK(buf.map(*dev));
 
   return buf;
+}
+
+void Kernel::fill(Buffer &buf, std::span<const std::byte> explicit_args,
+                  const DispatchConfig &cfg) const {
+  size_t total = abi::kernarg_alloc_size(kd->kernarg_size);
+  std::memset(buf.data(), 0, total);
+  std::memcpy(buf.data(), explicit_args.data(),
+              detail::min(explicit_args.size(), total));
+  abi::fill_implicit_args(buf.data(), explicit_args.size(), *kd, cfg);
 }
 
 std::expected<Executable, Error>
@@ -237,11 +240,8 @@ std::expected<Kernel, Error> Executable::kernel(std::string_view name) const {
                       static_cast<int>(name.size()), name.data(),
                       static_cast<unsigned long>(entry_off), image.size());
 
-  Kernel kernel{
-      .descriptor = kd,
-      .address = static_cast<std::byte *>(image.data()) + entry_off,
-  };
-  return kernel;
+  return Kernel(kd, static_cast<std::byte *>(image.data()) + entry_off,
+                &image.owner());
 }
 
 } // namespace kfd

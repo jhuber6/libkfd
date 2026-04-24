@@ -223,7 +223,8 @@ void launch_if_present(kfd::Device &dev, kfd::Executable &exe,
   kfd::DispatchConfig cfg{.grid = {.x = 1}, .block = {.x = 1}};
   kfd::Signal sig =
       KFD_EXPECT(kfd::Signal::create(dev.context(), /*initial=*/1));
-  kfd::Buffer ka = KFD_EXPECT(kernel->make_kernargs(dev, cfg));
+  kfd::Buffer ka = KFD_EXPECT(kernel->alloc());
+  kernel->fill(ka, cfg);
   KFD_EXPECT(compute.dispatch(*kernel, cfg, ka, sig));
   KFD_EXPECT(sig.wait(kfd::Condition::EQ, 0, UINT64_MAX));
 }
@@ -255,7 +256,7 @@ int main(int argc, const char **argv, const char **envp) {
   kfd::Kernel end = KFD_EXPECT(exe.kernel("_end.kd"));
 
   const auto &props = dev.properties();
-  bool wave32 = start.descriptor->kernel_code_properties &
+  bool wave32 = start.descriptor().kernel_code_properties &
                 kfd::abi::ENABLE_WAVEFRONT_SIZE32;
   uint32_t lane_size = wave32 ? 32 : 64;
   uint32_t simd_per_cu = props.simd_per_cu ? props.simd_per_cu : 1;
@@ -308,8 +309,8 @@ int main(int argc, const char **argv, const char **envp) {
 
   BeginArgs begin_args{gpu_argc, dev_argv.data(), dev_envp.data()};
   kfd::DispatchConfig begin_cfg{.grid = {.x = 1}, .block = {.x = 1}};
-  kfd::Buffer begin_ka =
-      KFD_EXPECT(begin.make_kernargs(dev, begin_args, begin_cfg));
+  kfd::Buffer begin_ka = KFD_EXPECT(begin.alloc());
+  begin.fill(begin_ka, begin_args, begin_cfg);
 
   StartArgs start_args{gpu_argc, dev_argv.data(), dev_envp.data(),
                        dev_ret.data()};
@@ -317,11 +318,12 @@ int main(int argc, const char **argv, const char **envp) {
       .grid = {.x = opts.blocks_x, .y = opts.blocks_y, .z = opts.blocks_z},
       .block = {.x = opts.threads_x, .y = opts.threads_y, .z = opts.threads_z},
   };
-  kfd::Buffer start_ka =
-      KFD_EXPECT(start.make_kernargs(dev, start_args, start_cfg));
+  kfd::Buffer start_ka = KFD_EXPECT(start.alloc());
+  start.fill(start_ka, start_args, start_cfg);
 
   kfd::DispatchConfig end_cfg{.grid = {.x = 1}, .block = {.x = 1}};
-  kfd::Buffer end_ka = KFD_EXPECT(end.make_kernargs(dev, end_cfg));
+  kfd::Buffer end_ka = KFD_EXPECT(end.alloc());
+  end.fill(end_ka, end_cfg);
 
   launch_if_present(dev, exe, compute, "amdgcn.device.init.kd");
 

@@ -26,27 +26,37 @@ class SDMAQueue;
 
 // A representation of an executable kernel on the device. Only valid for the
 // lifetime of the Executable it was obtained from.
-struct Kernel {
-  const abi::KernelDescriptor *descriptor;
-  const void *address;
+class Kernel {
+public:
+  const abi::KernelDescriptor &descriptor() const { return *kd; }
+  const void *address() const { return entry; }
 
-  // Kernargs must outlive the kernel they are attached to, they provide the
-  // backing for the AMDGPU compute ABI.
+  // Allocate a kernarg buffer with the correct memory type and flags. This
+  // memory must outlive the kernel it is used to launch.
+  std::expected<Buffer, Error> alloc() const;
+
+  // Fill a buffer with kernel arguments so it can be dispatched to the GPU.
   template <typename T>
-  std::expected<Buffer, Error> make_kernargs(Device &dev,
-                                             const T &explicit_args,
-                                             const DispatchConfig &cfg) const {
-    return make_kernargs(dev, std::as_bytes(std::span(&explicit_args, 1)), cfg);
+  void fill(Buffer &buf, const T &explicit_args,
+            const DispatchConfig &cfg) const {
+    fill(buf, std::as_bytes(std::span(&explicit_args, 1)), cfg);
   }
-  std::expected<Buffer, Error> make_kernargs(Device &dev,
-                                             const DispatchConfig &cfg) const {
-    return make_kernargs(dev, {}, cfg);
+  void fill(Buffer &buf, const DispatchConfig &cfg) const {
+    fill(buf, {}, cfg);
   }
 
 private:
-  std::expected<Buffer, Error>
-  make_kernargs(Device &dev, std::span<const std::byte> explicit_args,
-                const DispatchConfig &cfg) const;
+  friend class Executable;
+
+  Kernel(const abi::KernelDescriptor *kd, const void *entry, Device *dev)
+      : kd(kd), entry(entry), dev(dev) {}
+
+  void fill(Buffer &buf, std::span<const std::byte> explicit_args,
+            const DispatchConfig &cfg) const;
+
+  const abi::KernelDescriptor *kd;
+  const void *entry;
+  Device *dev;
 };
 
 // An owning executable ELF object loaded into GPU VRAM memory.

@@ -27,8 +27,9 @@ kfd::Buffer dispatch_spinner(kfd::ComputeQueue &queue,
   };
   Args args{flag};
   kfd::DispatchConfig cfg{.grid = {.x = 1}, .block = {.x = 1}};
-  auto kernarg = kernel.make_kernargs(gpu, args, cfg);
+  auto kernarg = kernel.alloc();
   REQUIRE_RESULT(kernarg);
+  kernel.fill(*kernarg, args, cfg);
   REQUIRE_RESULT(queue.dispatch(kernel, cfg, *kernarg));
   return std::move(*kernarg);
 }

@@ -31,7 +31,8 @@ std::expected<LaunchFixture, kfd::Error> make_fixture(kfd::Device &dev) {
   auto base = KFD_TRY(make_device_fixture(dev, dispatch_kernels));
   auto nop = KFD_TRY(base.exe.kernel("nop.kd"));
   kfd::DispatchConfig cfg{.grid = {.x = 1}, .block = {.x = 64}};
-  auto ka = KFD_TRY(nop.make_kernargs(*base.gpu, cfg));
+  auto ka = KFD_TRY(nop.alloc());
+  nop.fill(ka, cfg);
   return LaunchFixture{std::move(base), std::move(nop), std::move(ka)};
 }
 
@@ -43,8 +44,9 @@ void dispatch_nop(LaunchFixture &fix, kfd::Dim3 grid = {.x = 1},
   if (is_default) {
     REQUIRE_RESULT(fix.compute.dispatch(fix.nop, cfg, fix.nop_kernarg));
   } else {
-    auto ka = fix.nop.make_kernargs(*fix.gpu, cfg);
+    auto ka = fix.nop.alloc();
     REQUIRE_RESULT(ka);
+    fix.nop.fill(*ka, cfg);
     REQUIRE_RESULT(fix.compute.dispatch(fix.nop, cfg, *ka));
   }
 }
@@ -171,8 +173,9 @@ TEST_CASE("Launch - two independent compute queues", "[device][launch]") {
       REQUIRE_RESULT(compute2);
 
       kfd::DispatchConfig cfg{.grid = {.x = 4}, .block = {.x = 64}};
-      auto kernarg = fix->nop.make_kernargs(*fix->gpu, cfg);
+      auto kernarg = fix->nop.alloc();
       REQUIRE_RESULT(kernarg);
+      fix->nop.fill(*kernarg, cfg);
 
       constexpr unsigned N = 32;
       for (unsigned i = 0; i < N; ++i) {
@@ -216,8 +219,9 @@ TEST_CASE("Launch - shared queue with per-thread signals", "[device][launch]") {
       }
 
       kfd::DispatchConfig cfg{.grid = {.x = 4}, .block = {.x = 64}};
-      auto kernarg = fix->nop.make_kernargs(*fix->gpu, cfg);
+      auto kernarg = fix->nop.alloc();
       REQUIRE_RESULT(kernarg);
+      fix->nop.fill(*kernarg, cfg);
 
       std::vector<std::thread> threads;
       threads.reserve(NUM_THREADS);

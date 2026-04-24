@@ -98,12 +98,14 @@ public:
 
   void *data() const { return mapping.data(); }
 
+  Device &owner() const { return *dev; }
+
   // Relinquish ownership without freeing. Returns the KFD handle; the caller
   // assumes responsibility for the GPU handle and the underlying mapping.
   uint64_t release() {
     len = 0;
     mapping.release();
-    owner = nullptr;
+    dev = nullptr;
     return std::exchange(handle, 0);
   }
 
@@ -127,7 +129,7 @@ private:
   detail::MappedRegion mapping;
   detail::Box<detail::Mutex> mtx;
   detail::SmallVector<uint32_t, 2> mapped_ids;
-  Device *owner = nullptr;
+  Device *dev = nullptr;
 };
 
 // Get a DMA buffer interface to an existing buffer object. Exposes the standard
