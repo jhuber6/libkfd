@@ -202,8 +202,12 @@ void QueueBase::scratch_handler(Event &, void *user_data) {
     // Fetch the number of slots that will be allocating the per-thread scratch.
     uint32_t gfx = sctx->dev->gfx_version();
     Dim3 block = req.block;
-    uint32_t slots = detail::scratch_device_slots(*sctx->dev);
-    uint32_t num_se = detail::scratch_num_se(*sctx->dev);
+    uint32_t slots = detail::scratch_device_slots(*sctx->dev, 1);
+    uint32_t dev_num_xcc =
+        sctx->dev->properties().num_xcc ? sctx->dev->properties().num_xcc : 1;
+    uint32_t num_se = detail::scratch_num_se(*sctx->dev) / dev_num_xcc;
+    if (num_se == 0)
+      num_se = 1;
     uint32_t waves_per_group =
         detail::max(static_cast<uint32_t>(
                         (static_cast<uint64_t>(block.x) * block.y * block.z +
@@ -252,7 +256,7 @@ void QueueBase::scratch_handler(Event &, void *user_data) {
       sctx->scratch_size = alloc_size;
       __atomic_store_n(&sctx->scratch_tmpring,
                        detail::compute_tmpring_size(
-                           *sctx->dev, req.needed_per_thread, alloc_size),
+                           *sctx->dev, req.needed_per_thread, alloc_size, 1),
                        __ATOMIC_RELAXED);
       __atomic_store_n(&sctx->scratch_per_thread, req.needed_per_thread,
                        __ATOMIC_RELAXED);
@@ -293,7 +297,8 @@ void QueueBase::scratch_handler(Event &, void *user_data) {
 // Create a queue to communicate with the device's command processor. Each queue
 // is a ring buffer that consumes variable length packets for the processor.
 std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
-                                                  size_t ring_size) {
+                                                  size_t ring_size,
+                                                  uint32_t target_xcc) {
   Context &ctx = dev.context();
   if (!std::has_single_bit(ring_size))
     return kfd::unexpected(EINVAL, "ring size %zu is not a power of two",
@@ -400,7 +405,7 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
       .ring_size = static_cast<uint32_t>(ring_size),
       .gpu_id = dev.gpu_id(),
       .queue_type = static_cast<uint32_t>(type),
-      .queue_percentage = 100,
+      .queue_percentage = (target_xcc << 8) | 100,
       .queue_priority = 7,
   };
   if (is_compute) {
@@ -644,9 +649,10 @@ std::expected<void, Error> QueueBase::submit_impl(const uint32_t *data,
 
 // PM4 queues execute packets in order but do not explicitly wait for
 // completion.
-std::expected<ComputeQueue, Error> ComputeQueue::create(Device &dev,
-                                                        size_t ring_size) {
-  auto base = KFD_TRY(QueueBase::create(dev, QueueType::COMPUTE, ring_size));
+std::expected<ComputeQueue, Error>
+ComputeQueue::create(Device &dev, size_t ring_size, uint32_t target_xcc) {
+  auto base = KFD_TRY(
+      QueueBase::create(dev, QueueType::COMPUTE, ring_size, target_xcc));
 
   // Used to signal the completion of end-of-pipe packets to the queue. The CP
   // will poll this value repeatedly for the finished value so it lives in VRAM.

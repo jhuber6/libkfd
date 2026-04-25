@@ -69,10 +69,10 @@ uint32_t scratch_num_se(const Device &dev);
 //     N = 24 (GFX9-10, 13 bits), 26 (GFX11, 15 bits), 29 (GFX12, 18 bits)
 //     alignment_unit: 1024B (GFX9-10), 256B (GFX11+)
 uint32_t compute_tmpring_size(const Device &dev, uint32_t per_thread,
-                              size_t region_size);
+                              size_t region_size, uint32_t num_xcc = 0);
 
 // Maximum device scratch slot count (CUs * MaxSlotsScratchCU, SE-aligned).
-uint32_t scratch_device_slots(const Device &dev);
+uint32_t scratch_device_slots(const Device &dev, uint32_t num_xcc = 0);
 
 // Backing allocation size for the given per-thread need and wave slot count.
 size_t scratch_alloc_size(uint32_t gfx_version, uint32_t per_thread,

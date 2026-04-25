@@ -82,7 +82,8 @@ private:
   };
 
   static std::expected<QueueBase, Error> create(Device &dev, QueueType type,
-                                                size_t ring_size);
+                                                size_t ring_size,
+                                                uint32_t target_xcc = 0);
 
   QueueBase() = default;
   QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
@@ -125,7 +126,8 @@ private:
 class ComputeQueue {
 public:
   static std::expected<ComputeQueue, Error>
-  create(Device &dev, size_t ring_size = 4ul * detail::page_size());
+  create(Device &dev, size_t ring_size = 4ul * detail::page_size(),
+         uint32_t target_xcc = 0);
 
   ~ComputeQueue() = default;
 
