@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <vector>
 
 namespace {
@@ -128,6 +129,8 @@ int main(int argc, char **argv) {
         std::make_unique<kfd::Signal>(KFD_EXPECT(kfd::Signal::create(ctx)));
   }
 
+  auto elf_mtime = std::filesystem::last_write_time(argv[1]);
+
   auto win = KFD_EXPECT(
       DRI3Window::create(width, height, NUM_BUFFERS, "libkfd computetoy"));
 
@@ -145,6 +148,22 @@ int main(int argc, char **argv) {
 
   while (win.poll()) {
     win.wait_idle(current);
+
+    if (auto t = std::filesystem::last_write_time(argv[1]); t != elf_mtime) {
+      elf_mtime = t;
+      auto new_file = read_file(argv[1]);
+      exe = KFD_EXPECT(kfd::Executable::load(dev, new_file, sdma, compute));
+      kernel = KFD_EXPECT(exe.kernel("fragment.kd"));
+      for (uint32_t i = 0; i < NUM_BUFFERS; ++i) {
+        fbs[i].kernarg = KFD_EXPECT(kernel.alloc());
+        Uniforms init{
+            .framebuffer = fbs[i].buffer.data(),
+            .width = width,
+            .height = height,
+        };
+        kernel.fill(fbs[i].kernarg, init, cfg);
+      }
+    }
 
     auto now = std::chrono::high_resolution_clock::now();
     float time = std::chrono::duration<float>(now - start).count();

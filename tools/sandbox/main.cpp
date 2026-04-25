@@ -1,8 +1,7 @@
 //===-- tools/sandbox/main.cpp - SAXPY example ------------------*- C++ -*-===//
 //
 // Demonstrates the libkfd API by running a SAXPY kernel (y = a*x + y) on the
-// GPU. This example does not require RPC support; it only exercises the core
-// context, memory, loader, dispatch, and signal interfaces.
+// GPU.
 //
 // $ sandbox <saxpy.elf> [N=1048576]
 //
