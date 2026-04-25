@@ -723,7 +723,7 @@ TEST_CASE("Queue - custom release_mem with manual event", "[queue][custom]") {
           event->signal_addr(), static_cast<uint64_t>(event->event_id()),
           event->trigger_data()));
 
-      REQUIRE_RESULT(event->wait(5000));
+      REQUIRE_RESULT(event->wait(kfd::test::WAIT_TIMEOUT_NS));
       CHECK(*fence == DONE);
     }
   }
