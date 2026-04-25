@@ -1,30 +1,4 @@
-#include <gpuintrin.h>
-
-typedef float __attribute__((ext_vector_type(2))) float2;
-typedef float __attribute__((ext_vector_type(3))) float3;
-typedef float __attribute__((ext_vector_type(4))) float4;
-
-#define MATH(FN, TY)                                                           \
-  [[clang::overloadable]] static TY FN(TY x) {                                 \
-    return __builtin_elementwise_##FN(x);                                      \
-  }
-MATH(sin, float)
-MATH(cos, float)
-MATH(sqrt, float)
-MATH(sin, float3)
-
-static float dot(float2 a, float2 b) { return a.x * b.x + a.y * b.y; }
-
-static float clamp(float x, float min, float max) {
-  return x < min ? min : (x > max ? max : x);
-}
-
-static unsigned pack_argb(float4 c) {
-  return (unsigned)(clamp(c.a, 0.0f, 1.0f) * 255.0f) << 24u |
-         (unsigned)(clamp(c.r, 0.0f, 1.0f) * 255.0f) << 16u |
-         (unsigned)(clamp(c.g, 0.0f, 1.0f) * 255.0f) << 8u |
-         (unsigned)(clamp(c.b, 0.0f, 1.0f) * 255.0f);
-}
+#include "shader.h"
 
 struct Uniforms {
   unsigned *framebuffer;

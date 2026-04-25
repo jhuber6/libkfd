@@ -17,7 +17,6 @@ foreach(arch IN LISTS LIBKFD_GPU_ARCHS)
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/kernels")
 
   target_compile_options(${target} PRIVATE
-    ${common_compile_options}
     --target=amdgcn--amdhsa
     -mcpu=${arch}
     -nogpulib

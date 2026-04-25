@@ -165,6 +165,15 @@ be loaded at runtime via `kfd::Executable::load` like in the SAXPY example.
 clang --target=amdgcn--amdhsa -mcpu=gfx1100 -nostdlibinc -O2 saxpy.c -o image
 ```
 
+## Tests
+
+The test suite covers all of the basic operations. It uses catch2 and can be
+invoked through ctest.
+
+```sh
+ctest -j8
+```
+
 ## Tools
 
 The project includes some command-line tools to serve as examples. The
