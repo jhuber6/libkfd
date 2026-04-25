@@ -5,7 +5,7 @@ foreach(arch IN LISTS LIBKFD_GPU_ARCHS)
 
   add_executable(${target} saxpy.c)
   set_target_properties(${target} PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/kernels")
 
   target_compile_options(${target} PRIVATE
     ${common_compile_options}
