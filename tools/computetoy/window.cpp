@@ -187,17 +187,32 @@ std::expected<void, kfd::Error> DRI3Window::import_buffer(uint32_t index,
     return kfd::unexpected(errno, "dup() failed for dmabuf fd");
 
   pixmaps[index] = xcb_generate_id(conn);
-  xcb_dri3_pixmap_from_buffer(
+  auto cookie = xcb_dri3_pixmap_from_buffer_checked(
       conn, pixmaps[index], win, static_cast<uint32_t>(size),
       static_cast<uint16_t>(w), static_cast<uint16_t>(h),
       static_cast<uint16_t>(stride), depth, 32, fd);
+  if (auto *err = xcb_request_check(conn, cookie)) {
+    uint8_t code = err->error_code;
+    std::free(err);
+    return kfd::unexpected(
+        EIO, "DRI3 pixmap_from_buffer failed (X error %u, %ux%u stride %u)",
+        code, w, h, stride);
+  }
   return {};
 }
 
 bool DRI3Window::poll() {
   xcb_generic_event_t *event;
   while ((event = xcb_poll_for_event(conn))) {
-    switch (event->response_type & 0x7f) {
+    uint8_t type = event->response_type & 0x7f;
+    if (type == 0) {
+      auto *err = reinterpret_cast<xcb_generic_error_t *>(event);
+      std::fprintf(stderr, "X11 error: code %u, sequence %u, resource %u\n",
+                   err->error_code, err->sequence, err->resource_id);
+      std::free(event);
+      continue;
+    }
+    switch (type) {
     case XCB_KEY_PRESS: {
       auto *kp = reinterpret_cast<xcb_key_press_event_t *>(event);
       // Raw keycodes to avoid the xcb-keysyms dependency for now.

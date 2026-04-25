@@ -4,6 +4,7 @@ struct Uniforms {
   unsigned *framebuffer;
   unsigned width;
   unsigned height;
+  unsigned pitch;
   float time;
   unsigned frame;
 };
@@ -29,6 +30,5 @@ __gpu_kernel void fragment(struct Uniforms u) {
   float3 phase = v * PI + (float3){0.0f, TAU / 3.0f, 2.0f * TAU / 3.0f};
   float3 rgb = sin(phase) * 0.5f + 0.5f;
 
-  u.framebuffer[y * u.width + x] =
-      pack_argb((float4){rgb.r, rgb.g, rgb.b, 1.0f});
+  pixel(u, x, y) = pack_argb((float4){rgb.r, rgb.g, rgb.b, 1.0f});
 }

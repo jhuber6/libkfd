@@ -32,10 +32,14 @@ struct Framebuffer {
   std::unique_ptr<kfd::Signal> signal;
 };
 
+// The textures that the DMA-buf gets converted to must be 256-byte strided.
+constexpr uint32_t STRIDE_ALIGN = 256;
+
 struct Uniforms {
   void *framebuffer;
   uint32_t width;
   uint32_t height;
+  uint32_t pitch;
   float time;
   uint32_t frame;
 };
@@ -107,7 +111,9 @@ int main(int argc, char **argv) {
       .block = {.x = BLOCK_X, .y = BLOCK_Y},
   };
 
-  uint32_t stride = width * sizeof(unsigned);
+  uint32_t stride =
+      (width * sizeof(unsigned) + STRIDE_ALIGN - 1) & ~(STRIDE_ALIGN - 1);
+  uint32_t pitch = stride / sizeof(unsigned);
   size_t fb_size = static_cast<size_t>(stride) * height;
 
   Framebuffer fbs[NUM_BUFFERS];
@@ -121,6 +127,7 @@ int main(int argc, char **argv) {
         .framebuffer = fbs[i].buffer.data(),
         .width = width,
         .height = height,
+        .pitch = pitch,
     };
     fbs[i].kernarg = KFD_EXPECT(kernel.alloc());
     kernel.fill(fbs[i].kernarg, initial, cfg);
@@ -135,7 +142,8 @@ int main(int argc, char **argv) {
       DRI3Window::create(width, height, NUM_BUFFERS, "libkfd computetoy"));
 
   for (uint32_t i = 0; i < NUM_BUFFERS; ++i)
-    KFD_EXPECT(win.import_buffer(i, fbs[i].dmabuf.fd(), fb_size, stride));
+    KFD_EXPECT(
+        win.import_buffer(i, fbs[i].dmabuf.fd(), fbs[i].buffer.size(), stride));
 
   uint32_t current = 0;
   uint32_t frame = 0;
@@ -160,6 +168,7 @@ int main(int argc, char **argv) {
             .framebuffer = fbs[i].buffer.data(),
             .width = width,
             .height = height,
+            .pitch = pitch,
         };
         kernel.fill(fbs[i].kernarg, init, cfg);
       }
@@ -172,6 +181,7 @@ int main(int argc, char **argv) {
         .framebuffer = fbs[current].buffer.data(),
         .width = width,
         .height = height,
+        .pitch = pitch,
         .time = time,
         .frame = frame,
     };

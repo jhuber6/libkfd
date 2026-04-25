@@ -286,4 +286,6 @@ static unsigned pack_argb(float4 c) {
          (unsigned)(c.g * 255.0f) << 8u | (unsigned)(c.b * 255.0f);
 }
 
+#define pixel(u, x, y) ((u).framebuffer[(y) * (u).pitch + (x)])
+
 #endif // COMPUTETOY_SHADER_H

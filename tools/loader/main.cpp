@@ -282,9 +282,10 @@ int main(int argc, const char **argv, const char **envp) {
                   rpc::Server::doorbell_offset(),
               &db, sizeof(rpc::Doorbell));
 
+  kfd::Buffer client_staging;
   auto client_sym = exe.symbol("__llvm_rpc_client");
   if (client_sym) {
-    kfd::Buffer client_staging = KFD_EXPECT(kfd::Buffer::allocate(
+    client_staging = KFD_EXPECT(kfd::Buffer::allocate(
         dev, sizeof(rpc::Client), kfd::MemType::GTT, kfd::MemFlags::WRITABLE));
     KFD_EXPECT(client_staging.map(dev));
     rpc::Client client(port_count, rpc_buf.data());
