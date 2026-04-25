@@ -1,7 +1,8 @@
-//===-- tools/computetoy/window.h - DRI3/Present X11 window -----*- C++ -*-===//
+//===-- tools/computetoy/window.h - Display backend interface ----*- C++
+//-*-===//
 //
-// Encapsulates X11 window creation, DRI3 pixmap import from DMA buffer file
-// descriptors, and Present-based buffer management in an RAII format.
+// Abstract interface for presenting GPU-rendered frames. Concrete backends
+// implement this for X11 (DRI3/Present) and raw DRM/KMS console output.
 //
 //===----------------------------------------------------------------------===//
 
@@ -14,57 +15,45 @@
 #include <expected>
 #include <memory>
 
-#include <xcb/xcb.h>
-
-class DRI3Window {
+class Window {
 public:
-  ~DRI3Window();
+  virtual ~Window() = default;
 
-  DRI3Window(const DRI3Window &) = delete;
-  DRI3Window &operator=(const DRI3Window &) = delete;
-  DRI3Window(DRI3Window &&other);
-  DRI3Window &operator=(DRI3Window &&) = delete;
+  Window(const Window &) = delete;
+  Window &operator=(const Window &) = delete;
 
-  // Connect to X, create a window, and initialize DRI3 + Present extensions.
-  static std::expected<DRI3Window, kfd::Error> create(uint32_t width,
-                                                      uint32_t height,
-                                                      uint32_t num_buffers,
-                                                      const char *title);
-
-  // Import a DMA buffer file descriptor as a presentable pixmap. The fd is
+  // Import a DMA buffer file descriptor as a presentable buffer. The fd is
   // dup'd internally and the caller retains ownership of the original.
-  std::expected<void, kfd::Error> import_buffer(uint32_t index, int dmabuf_fd,
-                                                size_t size, uint32_t stride);
+  virtual std::expected<void, kfd::Error> import_buffer(uint32_t index,
+                                                        int dmabuf_fd,
+                                                        size_t size,
+                                                        uint32_t stride) = 0;
 
-  // Poll X11 events. Returns false when the window should close (Escape key
-  // or WM_DELETE_WINDOW).
-  bool poll();
+  // Poll for input events. Returns false when the session should end.
+  virtual bool poll() = 0;
 
-  // Block until the X server is done reading the given buffer.
-  void wait_idle(uint32_t index);
+  // Block until the given buffer is no longer in use by the display.
+  virtual void wait_idle(uint32_t index) = 0;
 
-  // Present the pixmap for the given buffer and mark it busy.
-  void present(uint32_t index);
+  // Present the given buffer to the display.
+  virtual void present(uint32_t index) = 0;
 
-private:
-  DRI3Window(xcb_connection_t *conn, xcb_window_t win, xcb_colormap_t colormap,
-             xcb_atom_t wm_delete, xcb_special_event_t *present_special,
-             uint8_t depth, uint32_t w, uint32_t h, uint32_t num_buffers);
+  uint32_t width() const { return w; }
+  uint32_t height() const { return h; }
 
-  void drain_present_events(bool block);
+  // Steady-state frame interval in seconds, or 0 if unknown (free-running).
+  // DRM reports the vblank period; XCB/Present runs unthrottled.
+  virtual double frame_interval() const { return 0.0; }
 
-  xcb_connection_t *conn = nullptr;
-  xcb_window_t win = 0;
-  xcb_colormap_t colormap = 0;
-  xcb_atom_t wm_delete = 0;
-  xcb_special_event_t *present_special = nullptr;
-  uint8_t depth = 0;
-  uint32_t w = 0;
-  uint32_t h = 0;
-  uint32_t num_buffers = 0;
+  static std::expected<std::unique_ptr<Window>, kfd::Error>
+  create(uint32_t width, uint32_t height, uint32_t num_buffers,
+         const char *title, int render_fd = -1);
 
-  std::unique_ptr<xcb_pixmap_t[]> pixmaps;
-  std::unique_ptr<bool[]> busy;
+protected:
+  Window(uint32_t w, uint32_t h) : w(w), h(h) {}
+
+  uint32_t w;
+  uint32_t h;
 };
 
 #endif // COMPUTETOY_WINDOW_H

@@ -21,7 +21,7 @@
 
 namespace {
 
-constexpr uint32_t NUM_BUFFERS = 2;
+constexpr uint32_t NUM_BUFFERS = 3;
 constexpr uint32_t BLOCK_X = 16;
 constexpr uint32_t BLOCK_Y = 16;
 
@@ -105,6 +105,12 @@ int main(int argc, char **argv) {
   auto exe = KFD_EXPECT(kfd::Executable::load(dev, file, sdma, compute));
   auto kernel = KFD_EXPECT(exe.kernel("fragment.kd"));
 
+  // The DRM backend will override the resolution to match the native mode.
+  auto win = KFD_EXPECT(Window::create(width, height, NUM_BUFFERS,
+                                       "libkfd computetoy", dev.render_fd()));
+  width = win->width();
+  height = win->height();
+
   kfd::DispatchConfig cfg{
       .grid = {.x = (width + BLOCK_X - 1) / BLOCK_X,
                .y = (height + BLOCK_Y - 1) / BLOCK_Y},
@@ -136,14 +142,11 @@ int main(int argc, char **argv) {
         std::make_unique<kfd::Signal>(KFD_EXPECT(kfd::Signal::create(ctx)));
   }
 
-  auto elf_mtime = std::filesystem::last_write_time(argv[1]);
-
-  auto win = KFD_EXPECT(
-      DRI3Window::create(width, height, NUM_BUFFERS, "libkfd computetoy"));
-
   for (uint32_t i = 0; i < NUM_BUFFERS; ++i)
-    KFD_EXPECT(
-        win.import_buffer(i, fbs[i].dmabuf.fd(), fbs[i].buffer.size(), stride));
+    KFD_EXPECT(win->import_buffer(i, fbs[i].dmabuf.fd(), fbs[i].buffer.size(),
+                                  stride));
+
+  auto elf_mtime = std::filesystem::last_write_time(argv[1]);
 
   uint32_t current = 0;
   uint32_t frame = 0;
@@ -154,8 +157,11 @@ int main(int argc, char **argv) {
   std::printf("Entering render loop at %ux%u...\n", width, height);
   std::printf("Press 'q' to quit\n");
 
-  while (win.poll()) {
-    win.wait_idle(current);
+  while (win->poll()) {
+    win->wait_idle(current);
+
+    auto now = std::chrono::high_resolution_clock::now();
+    float time = std::chrono::duration<float>(now - start).count();
 
     if (auto t = std::filesystem::last_write_time(argv[1]); t != elf_mtime) {
       elf_mtime = t;
@@ -174,9 +180,6 @@ int main(int argc, char **argv) {
       }
     }
 
-    auto now = std::chrono::high_resolution_clock::now();
-    float time = std::chrono::duration<float>(now - start).count();
-
     Uniforms args{
         .framebuffer = fbs[current].buffer.data(),
         .width = width,
@@ -192,7 +195,7 @@ int main(int argc, char **argv) {
                                 *fbs[current].signal));
     KFD_EXPECT(fbs[current].signal->wait(kfd::Condition::EQ, 0, UINT64_MAX));
 
-    win.present(current);
+    win->present(current);
 
     current = (current + 1) % NUM_BUFFERS;
     ++frame;

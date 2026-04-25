@@ -28,7 +28,7 @@ __gpu_kernel void fragment(struct Uniforms u) {
   float v = (v1 + v2 + v3) * 0.333f;
 
   float3 phase = v * PI + (float3){0.0f, TAU / 3.0f, 2.0f * TAU / 3.0f};
-  float3 rgb = sin(phase) * 0.5f + 0.5f;
+  float3 rgb = sin(phase) * 0.5f + 0.75f;
 
   pixel(u, x, y) = pack_argb((float4){rgb.r, rgb.g, rgb.b, 1.0f});
 }
