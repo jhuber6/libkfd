@@ -724,14 +724,18 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
         static_cast<std::byte *>(kernarg.data()) +
         detail::align_up(static_cast<size_t>(kd.kernarg_size), size_t(64));
 
-  // Perform the standard register setup for the PM4 compute dispatch.
-  uint32_t buf[pm4::MAX_DISPATCH_DWORDS];
+  // Invalidate scalar caches (K-cache / GLK) so the shader reads fresh
+  // kernarg data. RELEASE_MEM only flushes L2 and vector L1; the scalar L1
+  // retains stale entries across dispatches to the same kernarg address.
+  uint32_t buf[pm4::ACQUIRE_MEM_DWORDS + pm4::MAX_DISPATCH_DWORDS];
+  uint32_t n = pm4::acquire_mem(buf, base.dev->gfx_version(), pm4::ACQ_KCACHE);
+
   void *va = __atomic_load_n(&sctx->scratch_va, __ATOMIC_RELAXED);
   uint32_t tmpring = __atomic_load_n(&sctx->scratch_tmpring, __ATOMIC_RELAXED);
-  auto n = pm4::build_dispatch_setup(
-      buf, base.dev->gfx_version(), kd, kernel.address(), cfg.grid, cfg.block,
-      kernarg.data(), dispatch_pkt_addr, va, tmpring, cfg.dynamic_lds,
-      private_segment_size);
+  n += pm4::build_dispatch_setup(buf + n, base.dev->gfx_version(), kd,
+                                 kernel.address(), cfg.grid, cfg.block,
+                                 kernarg.data(), dispatch_pkt_addr, va, tmpring,
+                                 cfg.dynamic_lds, private_segment_size);
 
   // Here we are either waiting for a scratch allocation or stalled behind
   // another kernel that is. We already encoded the scratch base so we use an

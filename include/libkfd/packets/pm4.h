@@ -460,15 +460,16 @@ inline uint32_t release_mem(uint32_t *out, uint32_t gfx_version) {
   return release_mem(out, eop_fence_flush(gfx_version), DATA_NONE, INT_NONE);
 }
 
-// ACQUIRE_MEM - invalidate GPU caches (full flush).
+// ACQUIRE_MEM - invalidate / writeback selected GPU caches.
 //
-// Used after loading code into VRAM to ensure the instruction caches fetch
-// fresh data. The packet layout differs between GFX9 (7 dwords, cache
-// actions in COHER_CNTL) and GFX10+ (8 dwords, cache actions in GCR_CNTL).
+// The packet layout differs between GFX9 (7 dwords, cache actions in
+// COHER_CNTL) and GFX10+ (8 dwords, cache actions in GCR_CNTL). Callers
+// specify an abstract bitmask of AcquireMemFlags; the function translates
+// these into the generation-specific hardware bits.
 //
-// COHER_SIZE/COHER_BASE are set to the maximum range (full flush) to be
-// conservative. Ranged invalidation is possible by setting specific
-// COHER_BASE/SIZE and GL2_RANGE modes on GFX10+.
+// COHER_SIZE/COHER_BASE are set to the maximum range (full flush).
+// Ranged invalidation is possible by setting specific COHER_BASE/SIZE
+// and GL2_RANGE modes on GFX10+.
 //
 // GFX9 COHER_CNTL bits (DW1):
 //   [3]   TC_NC_ACTION_ENA          Non-coherent TC action
@@ -506,9 +507,28 @@ inline uint32_t release_mem(uint32_t *out, uint32_t gfx_version) {
 //
 // References: amdgpu/soc15d.h; amdgpu/nvd.h;
 //             gfx_v9_0_emit_mem_sync; gfx_v10_0_emit_mem_sync
+enum AcquireMemFlags : uint32_t {
+  ACQ_KCACHE = 1u << 0, // Scalar L1 (K-cache / GLK)
+  ACQ_ICACHE = 1u << 1, // Instruction cache
+  ACQ_VCACHE = 1u << 2, // Vector L1/L0 (TCL1 / GLV + GL1)
+  ACQ_L2_INV = 1u << 3, // L2 / GL2 invalidate
+  ACQ_L2_WB = 1u << 4,  // L2 / GL2 writeback
+  ACQ_META = 1u << 5,   // Metadata (GL metadata WB + INV)
+
+  ACQ_ALL =
+      ACQ_KCACHE | ACQ_ICACHE | ACQ_VCACHE | ACQ_L2_INV | ACQ_L2_WB | ACQ_META,
+};
+
+inline constexpr AcquireMemFlags operator|(AcquireMemFlags a,
+                                           AcquireMemFlags b) {
+  return static_cast<AcquireMemFlags>(static_cast<uint32_t>(a) |
+                                      static_cast<uint32_t>(b));
+}
+
 inline constexpr uint32_t ACQUIRE_MEM_DWORDS = 8;
 
-inline uint32_t acquire_mem(uint32_t *out, uint32_t gfx_target_version) {
+inline uint32_t acquire_mem(uint32_t *out, uint32_t gfx_target_version,
+                            AcquireMemFlags flags = ACQ_ALL) {
   bool gfx10_plus = gfx_target_version >= abi::GFX_VERSION_GFX10_1;
   uint32_t dwords = gfx10_plus ? 8u : 7u;
 
@@ -518,20 +538,32 @@ inline uint32_t acquire_mem(uint32_t *out, uint32_t gfx_target_version) {
   out[0] = header(ACQUIRE_MEM, static_cast<uint16_t>(dwords - 2));
 
   if (!gfx10_plus) {
-    out[1] = (1u << 18)    // TC_WB_ACTION_ENA
-             | (1u << 22)  // TCL1_ACTION_ENA
-             | (1u << 23)  // TC_ACTION_ENA
-             | (1u << 27)  // SH_KCACHE_ACTION_ENA
-             | (1u << 29); // SH_ICACHE_ACTION_ENA
+    uint32_t cntl = 0;
+    if (flags & ACQ_KCACHE)
+      cntl |= (1u << 27); // SH_KCACHE_ACTION_ENA
+    if (flags & ACQ_ICACHE)
+      cntl |= (1u << 29); // SH_ICACHE_ACTION_ENA
+    if (flags & ACQ_VCACHE)
+      cntl |= (1u << 22); // TCL1_ACTION_ENA
+    if (flags & ACQ_L2_INV)
+      cntl |= (1u << 23); // TC_ACTION_ENA
+    if (flags & ACQ_L2_WB)
+      cntl |= (1u << 18); // TC_WB_ACTION_ENA
+    out[1] = cntl;
   } else {
-    out[7] = (1u << 0)     // GLI_INV = 1 (all lines)
-             | (1u << 4)   // GLM_WB
-             | (1u << 5)   // GLM_INV
-             | (1u << 7)   // GLK_INV
-             | (1u << 8)   // GLV_INV
-             | (1u << 9)   // GL1_INV
-             | (1u << 14)  // GL2_INV
-             | (1u << 15); // GL2_WB
+    uint32_t gcr = 0;
+    if (flags & ACQ_KCACHE)
+      gcr |= (1u << 7); // GLK_INV
+    if (flags & ACQ_VCACHE)
+      gcr |= (1u << 0)                // GLI_INV = ALL
+             | (1u << 8) | (1u << 9); // GLV_INV + GL1_INV
+    if (flags & ACQ_L2_INV)
+      gcr |= (1u << 14); // GL2_INV
+    if (flags & ACQ_L2_WB)
+      gcr |= (1u << 15); // GL2_WB
+    if (flags & ACQ_META)
+      gcr |= (1u << 4) | (1u << 5); // GLM_WB + GLM_INV
+    out[7] = gcr;
   }
 
   out[2] = 0xFFFFFFFF; // COHER_SIZE    (full flush)
@@ -812,7 +844,7 @@ inline uint32_t dispatch_initiator(const abi::KernelDescriptor &kd,
   return init;
 }
 
-inline constexpr uint32_t MAX_DISPATCH_DWORDS = 132;
+inline constexpr uint32_t MAX_DISPATCH_DWORDS = 140;
 
 // Encode the register-programming sequence for a compute dispatch into 'out'.
 // The resulting buffer can be invoked through a DISPATCH_DIRECT packet.

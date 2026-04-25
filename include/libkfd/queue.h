@@ -216,9 +216,10 @@ public:
     return base.submit(buf, pm4::RELEASE_MEM_DWORDS);
   }
 
-  std::expected<void, Error> acquire_mem() {
+  std::expected<void, Error>
+  acquire_mem(pm4::AcquireMemFlags flags = pm4::ACQ_ALL) {
     uint32_t buf[pm4::ACQUIRE_MEM_DWORDS];
-    auto n = pm4::acquire_mem(buf, base.dev->gfx_version());
+    auto n = pm4::acquire_mem(buf, base.dev->gfx_version(), flags);
     return base.submit(buf, n);
   }
 
