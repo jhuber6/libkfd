@@ -673,9 +673,6 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
                                                   const DispatchConfig &cfg,
                                                   const Buffer &kernarg) {
   const abi::KernelDescriptor &kd = kernel.descriptor();
-  if (kd.kernarg_preload & abi::KERNARG_PRELOAD_LENGTH_MASK)
-    return unexpected(ENOTSUP, "kernarg preload not yet supported");
-
   uint32_t private_segment_size = cfg.private_segment_size;
   if (!(kd.kernel_code_properties & abi::USES_DYNAMIC_STACK))
     private_segment_size = kd.private_segment_fixed_size;

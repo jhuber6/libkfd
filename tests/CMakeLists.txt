@@ -41,6 +41,7 @@ endfunction()
 # Produces: ${CMAKE_CURRENT_BINARY_DIR}/${name}_kernels.inc
 # Appends targets to the global property LIBKFD_GPU_KERNEL_TARGETS.
 function(add_gpu_kernel name source_file)
+  set(extra_options ${ARGN})
   set(targets "")
   set(entries "")
 
@@ -61,6 +62,7 @@ function(add_gpu_kernel name source_file)
       -nogpulib
       -nostdlibinc
       -O2
+      ${extra_options}
     )
 
     target_link_options(${target} PRIVATE

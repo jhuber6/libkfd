@@ -62,6 +62,9 @@ enum Opcode : uint8_t {
 // References: include/asic_reg/gc/gc_10_3_0_offset.h;
 //             amdkfd/kfd_pm4_headers.h;
 namespace regs {
+// Hardware limit on COMPUTE_USER_DATA registers (s0-s15).
+inline constexpr uint32_t MAX_USER_SGPRS = 16;
+
 inline constexpr uint32_t SH_BASE = 0x2C00;
 
 // 0x2E04-0x2E0B: grid origin, block dims, perf (8 regs).
@@ -877,7 +880,11 @@ inline uint32_t build_dispatch_setup(
 
   // Program address. SCRATCH_BASE_LO/HI is set separately via
   // set_scratch_base so the watcher IB can override it after a resize.
+  uint16_t preload_length =
+      kd.kernarg_preload & abi::KERNARG_PRELOAD_LENGTH_MASK;
   uint64_t entry_shifted = reinterpret_cast<uintptr_t>(entry_addr) >> 8;
+  if (preload_length && gfx_version < abi::GFX_VERSION_GFX1250)
+    entry_shifted += abi::KERNARG_PRELOAD_PROLOG_SIZE >> 8;
   if (gfx_version >= abi::GFX_VERSION_GFX9) {
     const uint32_t pgm[] = {detail::lo(entry_shifted),
                             detail::hi(entry_shifted), 0, 0};
@@ -913,7 +920,7 @@ inline uint32_t build_dispatch_setup(
 
   // User SGPRs are packed in ABI-mandated order from kernel_code_properties.
   // See the ordering table in abi.h for the slot layout.
-  uint32_t user_sgpr[16] = {};
+  uint32_t user_sgpr[regs::MAX_USER_SGPRS] = {};
   uint32_t i = 0;
   uint16_t props = kd.kernel_code_properties;
 
@@ -953,6 +960,17 @@ inline uint32_t build_dispatch_setup(
   if (props & abi::ENABLE_SGPR_PRIVATE_SEGMENT_SIZE)
     user_sgpr[i++] = private_segment_size ? private_segment_size
                                           : kd.private_segment_fixed_size;
+
+  if (preload_length && kernarg_addr) {
+    uint32_t preload_offset =
+        (kd.kernarg_preload >> abi::KERNARG_PRELOAD_OFFSET_SHIFT) & 0x1ffu;
+    uint32_t count = detail::min(static_cast<uint32_t>(preload_length),
+                                 regs::MAX_USER_SGPRS - i);
+    std::memcpy(&user_sgpr[i],
+                static_cast<const char *>(kernarg_addr) + preload_offset * 4,
+                count * sizeof(uint32_t));
+    i += count;
+  }
 
   if (i > 0)
     written +=

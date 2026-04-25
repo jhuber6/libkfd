@@ -30,6 +30,7 @@ inline constexpr uint32_t GFX_VERSION_GFX11_5 = 110005;
 inline constexpr uint32_t GFX_VERSION_GFX1151 = 110501;
 inline constexpr uint32_t GFX_VERSION_GFX12 = 120000;
 inline constexpr uint32_t GFX_VERSION_GFX12_1 = 120001;
+inline constexpr uint32_t GFX_VERSION_GFX1250 = 120500;
 
 // Decompose a gfx_target_version into its components.
 constexpr uint32_t gfx_version_major(uint32_t v) { return (v / 10000) % 100; }
@@ -81,9 +82,16 @@ inline constexpr uint16_t ENABLE_SGPR_PRIVATE_SEGMENT_SIZE = 1u << 6;
 inline constexpr uint16_t ENABLE_WAVEFRONT_SIZE32 = 1u << 10;
 inline constexpr uint16_t USES_DYNAMIC_STACK = 1u << 11;
 
+// Kernarg preload specification bitfield masks.
 inline constexpr uint16_t KERNARG_PRELOAD_LENGTH_MASK = 0x007f;
 inline constexpr unsigned KERNARG_PRELOAD_OFFSET_SHIFT = 7;
 inline constexpr uint16_t KERNARG_PRELOAD_OFFSET_MASK = 0xff80;
+
+// The kernarg preload support places arguments in the previously unused user
+// SGPRs during kernel launch. If this feature is enabled then we can simply
+// skip over the portion of the kernel call ABI that handled them. This fallback
+// prologue was removed on GFX1250+ ISAs.
+inline constexpr size_t KERNARG_PRELOAD_PROLOG_SIZE = 256;
 
 // AMDHSA kernel descriptor (64 bytes, 64-byte aligned).
 //
@@ -114,8 +122,8 @@ struct KernelDescriptor {
 
   // Signed byte offset from the start of this descriptor to the kernel
   // entry instruction. Target must be 256-byte aligned. When kernarg
-  // preload is active (preload length != 0), the CP adds 256 to skip a
-  // compatibility prologue inserted by the compiler.
+  // preload is active (preload length != 0), the runtime (or CP on AQL)
+  // adds KERNARG_PRELOAD_PROLOG_SIZE to skip the compatibility prolog.
   int64_t kernel_code_entry_byte_offset;
 
   uint8_t reserved1[20];
@@ -217,10 +225,10 @@ struct KernelDescriptor {
   // Total user data SGPRs requested by bits [6:0] must be <= 16.
   uint16_t kernel_code_properties;
 
-  // Kernarg preload specification. On supporting hardware the CP copies
-  // dwords from the kernarg segment into consecutive user SGPRs (placed
-  // after the last non-preload user SGPR) before wave launch. Reserved
-  // (zero) on GFX6-9 except GFX90A/GFX942.
+  // Kernarg preload specification. On when enabled the CP preloads
+  // dwords from the kernarg segment into consecutive user SGPRs rather than
+  // loading them from the kernel argument pointer. AQL only supports this with
+  // compatible firmware, but PM4 can do whatever it wants.
   //
   //   [6:0]  KERNARG_PRELOAD_SPEC_LENGTH   Dwords to preload (0 = disabled)
   //   [15:7] KERNARG_PRELOAD_SPEC_OFFSET   Dword offset into kernarg segment
