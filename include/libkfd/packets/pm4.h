@@ -62,8 +62,12 @@ enum Opcode : uint8_t {
 // References: include/asic_reg/gc/gc_10_3_0_offset.h;
 //             amdkfd/kfd_pm4_headers.h;
 namespace regs {
-// Hardware limit on COMPUTE_USER_DATA registers (s0-s15).
-inline constexpr uint32_t MAX_USER_SGPRS = 16;
+// Hardware limit on COMPUTE_USER_DATA registers.
+// GFX9-GFX12: 16 (s0-s15). GFX1250+: 32 (s0-s31).
+inline constexpr uint32_t MAX_USER_SGPRS = 32;
+constexpr uint32_t max_user_sgprs(uint32_t gfx_version) {
+  return gfx_version >= abi::GFX_VERSION_GFX1250 ? 32 : 16;
+}
 
 inline constexpr uint32_t SH_BASE = 0x2C00;
 
@@ -110,7 +114,7 @@ inline constexpr uint32_t COMPUTE_THREAD_TRACE_ENABLE = 0x2E1E;
 // 0x2E28: extended resource descriptor (single reg).
 inline constexpr uint32_t COMPUTE_PGM_RSRC3 = 0x2E28;
 
-// 0x2E40-0x2E4F: user data SGPRs (16 regs), loaded into s0-s15.
+// 0x2E40+: user data SGPRs loaded into s0-s15 (GFX9-12) or s0-s31 (GFX1250+).
 inline constexpr uint32_t COMPUTE_USER_DATA_0 = 0x2E40;
 
 // DISPATCH_DIRECT compute shader initiator bits.
@@ -920,6 +924,7 @@ inline uint32_t build_dispatch_setup(
 
   // User SGPRs are packed in ABI-mandated order from kernel_code_properties.
   // See the ordering table in abi.h for the slot layout.
+  const uint32_t max_sgprs = regs::max_user_sgprs(gfx_version);
   uint32_t user_sgpr[regs::MAX_USER_SGPRS] = {};
   uint32_t i = 0;
   uint16_t props = kd.kernel_code_properties;
@@ -964,8 +969,8 @@ inline uint32_t build_dispatch_setup(
   if (preload_length && kernarg_addr) {
     uint32_t preload_offset =
         (kd.kernarg_preload >> abi::KERNARG_PRELOAD_OFFSET_SHIFT) & 0x1ffu;
-    uint32_t count = detail::min(static_cast<uint32_t>(preload_length),
-                                 regs::MAX_USER_SGPRS - i);
+    uint32_t count =
+        detail::min(static_cast<uint32_t>(preload_length), max_sgprs - i);
     std::memcpy(&user_sgpr[i],
                 static_cast<const char *>(kernarg_addr) + preload_offset * 4,
                 count * sizeof(uint32_t));
