@@ -11,6 +11,7 @@
 #include "libkfd/device.h"
 
 #include <cerrno>
+#include <cstring>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -32,6 +33,23 @@ static_assert(static_cast<uint32_t>(kfd::MemFlags::UNCACHED) ==
               static_cast<uint32_t>(KFD_IOC_ALLOC_MEM_FLAGS_UNCACHED));
 static_assert(static_cast<uint32_t>(kfd::MemFlags::EXT_COHERENT) ==
               static_cast<uint32_t>(KFD_IOC_ALLOC_MEM_FLAGS_EXT_COHERENT));
+
+static_assert(static_cast<uint32_t>(kfd::SVMFlags::HOST_ACCESS) ==
+              KFD_IOCTL_SVM_FLAG_HOST_ACCESS);
+static_assert(static_cast<uint32_t>(kfd::SVMFlags::COHERENT) ==
+              KFD_IOCTL_SVM_FLAG_COHERENT);
+static_assert(static_cast<uint32_t>(kfd::SVMFlags::HIVE_LOCAL) ==
+              KFD_IOCTL_SVM_FLAG_HIVE_LOCAL);
+static_assert(static_cast<uint32_t>(kfd::SVMFlags::GPU_RO) ==
+              KFD_IOCTL_SVM_FLAG_GPU_RO);
+static_assert(static_cast<uint32_t>(kfd::SVMFlags::GPU_EXEC) ==
+              KFD_IOCTL_SVM_FLAG_GPU_EXEC);
+static_assert(static_cast<uint32_t>(kfd::SVMFlags::GPU_READ_MOSTLY) ==
+              KFD_IOCTL_SVM_FLAG_GPU_READ_MOSTLY);
+static_assert(static_cast<uint32_t>(kfd::SVMFlags::GPU_ALWAYS_MAPPED) ==
+              KFD_IOCTL_SVM_FLAG_GPU_ALWAYS_MAPPED);
+static_assert(static_cast<uint32_t>(kfd::SVMFlags::EXT_COHERENT) ==
+              KFD_IOCTL_SVM_FLAG_EXT_COHERENT);
 
 using namespace kfd::detail;
 
@@ -260,6 +278,76 @@ DMABuffer &DMABuffer::operator=(DMABuffer &&other) {
     dmabuf_fd = std::exchange(other.dmabuf_fd, -1);
   }
   return *this;
+}
+
+namespace {
+
+std::expected<void, kfd::Error>
+svm_set_attrs(int fd, void *addr, size_t size,
+              std::span<const ioctl::kfd::svm_attribute> attrs) {
+  constexpr size_t HDR = sizeof(ioctl::kfd::svm_args);
+  size_t extra = attrs.size() * sizeof(ioctl::kfd::svm_attribute);
+
+  alignas(ioctl::kfd::svm_args) char
+      buf[HDR + 16 * sizeof(ioctl::kfd::svm_attribute)] = {};
+  auto &args = *reinterpret_cast<ioctl::kfd::svm_args *>(buf);
+  args.start_addr = reinterpret_cast<uintptr_t>(addr);
+  args.size = size;
+  args.op = KFD_IOCTL_SVM_OP_SET_ATTR;
+  args.nattr = static_cast<uint32_t>(attrs.size());
+  std::memcpy(args.attrs, attrs.data(), extra);
+
+  return ioctl::call<ioctl::kfd::SVM>(fd, args, extra);
+}
+
+} // namespace
+
+std::expected<void, Error> svm_prefetch(Context &ctx, void *addr, size_t size,
+                                        Device *dev) {
+  ioctl::kfd::svm_attribute attr{
+      .type = KFD_IOCTL_SVM_ATTR_PREFETCH_LOC,
+      .value = dev ? dev->gpu_id() : 0,
+  };
+  return svm_set_attrs(ctx.kfd_fd(), addr, size, {&attr, 1});
+}
+
+std::expected<void, Error> svm_set_access(Context &ctx, void *addr, size_t size,
+                                          std::span<Device *const> devices,
+                                          bool in_place) {
+  uint32_t type =
+      in_place ? KFD_IOCTL_SVM_ATTR_ACCESS_IN_PLACE : KFD_IOCTL_SVM_ATTR_ACCESS;
+  SmallVector<ioctl::kfd::svm_attribute, 8> attrs;
+  for (auto *d : devices)
+    KFD_CHECK(attrs.push_back({.type = type, .value = d->gpu_id()}));
+  return svm_set_attrs(ctx.kfd_fd(), addr, size, {attrs.data(), attrs.size()});
+}
+
+std::expected<void, Error> svm_set_preferred_loc(Context &ctx, void *addr,
+                                                 size_t size, Device *dev) {
+  ioctl::kfd::svm_attribute attr{
+      .type = KFD_IOCTL_SVM_ATTR_PREFERRED_LOC,
+      .value = dev ? dev->gpu_id() : 0,
+  };
+  return svm_set_attrs(ctx.kfd_fd(), addr, size, {&attr, 1});
+}
+
+std::expected<void, Error> svm_set_flags(Context &ctx, void *addr, size_t size,
+                                         SVMFlags flags) {
+  uint32_t raw = static_cast<uint32_t>(flags);
+  ioctl::kfd::svm_attribute attrs[2] = {
+      {.type = KFD_IOCTL_SVM_ATTR_SET_FLAGS, .value = raw},
+      {.type = KFD_IOCTL_SVM_ATTR_CLR_FLAGS, .value = ~raw},
+  };
+  return svm_set_attrs(ctx.kfd_fd(), addr, size, attrs);
+}
+
+std::expected<void, Error>
+svm_set_granularity(Context &ctx, void *addr, size_t size, uint8_t log2_pages) {
+  ioctl::kfd::svm_attribute attr{
+      .type = KFD_IOCTL_SVM_ATTR_GRANULARITY,
+      .value = log2_pages,
+  };
+  return svm_set_attrs(ctx.kfd_fd(), addr, size, {&attr, 1});
 }
 
 } // namespace kfd

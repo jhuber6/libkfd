@@ -71,37 +71,6 @@ constexpr MemFlags QUEUE_GTT_FLAGS = MemFlags::WRITABLE | MemFlags::EXECUTABLE |
                                      MemFlags::NO_SUBSTITUTE |
                                      MemFlags::COHERENT | MemFlags::UNCACHED;
 
-// Register an anonymous mmap range as SVM with GPU_ALWAYS_MAPPED.
-std::expected<void, Error> register_svm(int kfd_fd, void *addr, size_t size,
-                                        uint32_t gpu_id) {
-  constexpr uint32_t NATTR = 6;
-  constexpr size_t ATTR_BYTES = NATTR * sizeof(ioctl::kfd::svm_attribute);
-  constexpr size_t TOTAL = sizeof(ioctl::kfd::svm_args) + ATTR_BYTES;
-
-  alignas(ioctl::kfd::svm_args) char buf[TOTAL]{};
-  auto *args = reinterpret_cast<ioctl::kfd::svm_args *>(buf);
-  ioctl::kfd::svm_attribute *attrs = args->attrs;
-
-  uint32_t flags = KFD_IOCTL_SVM_FLAG_HOST_ACCESS |
-                   KFD_IOCTL_SVM_FLAG_GPU_EXEC |
-                   KFD_IOCTL_SVM_FLAG_GPU_ALWAYS_MAPPED;
-
-  args->start_addr = reinterpret_cast<uintptr_t>(addr);
-  args->size = size;
-  args->op = KFD_IOCTL_SVM_OP_SET_ATTR;
-  args->nattr = NATTR;
-
-  attrs[0] = {.type = KFD_IOCTL_SVM_ATTR_PREFETCH_LOC, .value = gpu_id};
-  attrs[1] = {.type = KFD_IOCTL_SVM_ATTR_PREFERRED_LOC,
-              .value = KFD_IOCTL_SVM_LOCATION_SYSMEM};
-  attrs[2] = {.type = KFD_IOCTL_SVM_ATTR_CLR_FLAGS, .value = ~flags};
-  attrs[3] = {.type = KFD_IOCTL_SVM_ATTR_SET_FLAGS, .value = flags};
-  attrs[4] = {.type = KFD_IOCTL_SVM_ATTR_ACCESS, .value = gpu_id};
-  attrs[5] = {.type = KFD_IOCTL_SVM_ATTR_GRANULARITY, .value = 0xFF};
-
-  return ioctl::call<ioctl::kfd::SVM>(kfd_fd, *args, ATTR_BYTES);
-}
-
 // Set the scratch registers in the indirect buffer. This overrides what was
 // written in the standard packet with what the watcher thread allocated.
 uint32_t set_scratch_sgprs(uint32_t *out, uint32_t gfx_version,
@@ -357,8 +326,17 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
     auto cwsr_region = KFD_TRY(MappedRegion::create(total_cwsr));
     std::memset(cwsr_region.data(), 0, cwsr_region.size());
     if (svm_supported) {
-      KFD_CHECK(register_svm(ctx.kfd_fd(), cwsr_region.data(),
-                             cwsr_region.size(), dev.gpu_id()));
+      constexpr SVMFlags CWSR_SVM_FLAGS = SVMFlags::HOST_ACCESS |
+                                          SVMFlags::GPU_EXEC |
+                                          SVMFlags::GPU_ALWAYS_MAPPED;
+      void *svm_addr = cwsr_region.data();
+      size_t svm_size = cwsr_region.size();
+      KFD_CHECK(svm_set_preferred_loc(ctx, svm_addr, svm_size));
+      KFD_CHECK(svm_set_flags(ctx, svm_addr, svm_size, CWSR_SVM_FLAGS));
+      Device *dev_ptr = &dev;
+      KFD_CHECK(svm_set_access(ctx, svm_addr, svm_size, {&dev_ptr, 1}));
+      KFD_CHECK(svm_set_granularity(ctx, svm_addr, svm_size, 0xFF));
+      KFD_CHECK(svm_prefetch(ctx, svm_addr, svm_size, &dev));
     } else {
       constexpr MemFlags CWSR_PIN_FLAGS =
           MemFlags::WRITABLE | MemFlags::EXECUTABLE | MemFlags::COHERENT;
