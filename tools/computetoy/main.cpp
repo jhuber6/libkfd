@@ -163,7 +163,9 @@ int main(int argc, char **argv) {
     auto now = std::chrono::high_resolution_clock::now();
     float time = std::chrono::duration<float>(now - start).count();
 
-    if (auto t = std::filesystem::last_write_time(argv[1]); t != elf_mtime) {
+    std::error_code ec;
+    if (auto t = std::filesystem::last_write_time(argv[1], ec);
+        !ec && t != elf_mtime) {
       elf_mtime = t;
       auto new_file = read_file(argv[1]);
       exe = KFD_EXPECT(kfd::Executable::load(dev, new_file, sdma, compute));
