@@ -27,6 +27,36 @@ typedef unsigned __attribute__((ext_vector_type(3))) uint3;
 typedef unsigned __attribute__((ext_vector_type(4))) uint4;
 
 //===----------------------------------------------------------------------===//
+// Vector construction helpers
+//===----------------------------------------------------------------------===//
+
+[[clang::overloadable]] static float3 vec3(float2 xy, float z) {
+  return (float3){xy.x, xy.y, z};
+}
+[[clang::overloadable]] static float3 vec3(float x, float2 yz) {
+  return (float3){x, yz.x, yz.y};
+}
+
+[[clang::overloadable]] static float4 vec4(float3 xyz, float w) {
+  return (float4){xyz.x, xyz.y, xyz.z, w};
+}
+[[clang::overloadable]] static float4 vec4(float x, float3 yzw) {
+  return (float4){x, yzw.x, yzw.y, yzw.z};
+}
+[[clang::overloadable]] static float4 vec4(float2 xy, float2 zw) {
+  return (float4){xy.x, xy.y, zw.x, zw.y};
+}
+[[clang::overloadable]] static float4 vec4(float2 xy, float z, float w) {
+  return (float4){xy.x, xy.y, z, w};
+}
+[[clang::overloadable]] static float4 vec4(float x, float2 yz, float w) {
+  return (float4){x, yz.x, yz.y, w};
+}
+[[clang::overloadable]] static float4 vec4(float x, float y, float2 zw) {
+  return (float4){x, y, zw.x, zw.y};
+}
+
+//===----------------------------------------------------------------------===//
 // Elementwise builtin overloads
 //===----------------------------------------------------------------------===//
 
@@ -43,7 +73,7 @@ typedef unsigned __attribute__((ext_vector_type(4))) uint4;
   [[clang::overloadable]] static float4 FN(float4 x) {                         \
     return __builtin_elementwise_##FN(x);                                      \
   }                                                                            \
-  static_assert(1, "")
+  static_assert(1)
 
 #define OVERLOAD_F2(FN)                                                        \
   [[clang::overloadable]] static float FN(float x, float y) {                  \
@@ -58,7 +88,7 @@ typedef unsigned __attribute__((ext_vector_type(4))) uint4;
   [[clang::overloadable]] static float4 FN(float4 x, float4 y) {               \
     return __builtin_elementwise_##FN(x, y);                                   \
   }                                                                            \
-  static_assert(1, "")
+  static_assert(1)
 
 #define OVERLOAD_F3(FN)                                                        \
   [[clang::overloadable]] static float FN(float x, float y, float z) {         \
@@ -73,7 +103,7 @@ typedef unsigned __attribute__((ext_vector_type(4))) uint4;
   [[clang::overloadable]] static float4 FN(float4 x, float4 y, float4 z) {     \
     return __builtin_elementwise_##FN(x, y, z);                                \
   }                                                                            \
-  static_assert(1, "")
+  static_assert(1)
 
 OVERLOAD_F1(sin);
 OVERLOAD_F1(cos);
@@ -280,10 +310,13 @@ static float3 cross(float3 a, float3 b) {
 // Utility
 //===----------------------------------------------------------------------===//
 
-static unsigned pack_argb(float4 c) {
+[[clang::overloadable]] static unsigned pack_argb(float4 c) {
   c = saturate(c);
   return (unsigned)(c.a * 255.0f) << 24u | (unsigned)(c.r * 255.0f) << 16u |
          (unsigned)(c.g * 255.0f) << 8u | (unsigned)(c.b * 255.0f);
+}
+[[clang::overloadable]] static unsigned pack_argb(float3 c) {
+  return pack_argb(vec4(c, 1.0));
 }
 
 #define pixel(u, x, y) ((u).framebuffer[(y) * (u).pitch + (x)])
