@@ -241,10 +241,10 @@ static_assert(sizeof(KernelDescriptor) == 64);
 
 // Implicit kernarg block (256 bytes, 8-byte aligned).
 //
-// The compiler appends this after each kernel's explicit arguments,
-// starting at align_up(explicit_kernarg_size, 8) from the kernarg base.
-// The runtime must fill these slots before dispatch; the hardware does
-// not populate them and they are part of the compute ABI.
+// The compiler appends this after each kernel's explicit arguments, starting at
+// align_up(explicit_kernarg_size, 8) from the kernarg base. The runtime must
+// fill these slots before dispatch. the hardware does not populate them and
+// they are part of the compute ABI. The vast majority of these are unused.
 //
 // Reference: clang/lib/Headers/amdhsa_abi.h
 struct ImplicitArgs {
@@ -292,33 +292,28 @@ static_assert(sizeof(ImplicitArgs) == 256);
 // Context save/restore area header (40 bytes).
 //
 // Placed at the start of the CWSR save area for each XCC. The kernel and trap
-// handler read and write this structure during preemption  and exception
-// delivery.
+// handler read and write this structure during preemption and exception
+// delivery. On a shader trap the handler writes EC_QUEUE_WAVE_* flags to
+// err_payload_addr via MSG_INTERRUPT and KFD signals err_event_id.
 //
-// Exception delivery path:
-//   1. A shader trap (illegal instruction, memory violation, etc.)
-//      invokes the trap handler.
-//   2. The trap handler writes an exception bitmask (EC_QUEUE_WAVE_*) to
-//      *err_payload_addr via MSG_INTERRUPT.
-//   3. KFD signals the event identified by err_event_id.
-//   4. The runtime's fault watcher thread receives the event and reports the
-//      exception.
-//
-// References: linux/kfd_ioctl.h  (struct kfd_context_save_area_header)
+// Reference: linux/kfd_ioctl.h (struct kfd_context_save_area_header)
 struct CwsrHeader {
-  uint32_t control_stack_offset; // Byte offset from save area start to the last
-                                 // saved top of control stack data.
-  uint32_t control_stack_size;   // Byte size of saved control stack data.
-  uint32_t wave_state_offset;    // Byte offset from save area start to the last
-                                 // saved base of wave state data.
-  uint32_t wave_state_size;      // Byte size of saved wave state data.
-  uint32_t debug_offset;         // Byte offset from save area start to the
-                                 // debugger-reserved memory. 64B aligned.
-  uint32_t debug_size;           // Byte size of debugger memory. 64B aligned.
-  uint64_t err_payload_addr;     // GPU VA of the error reason bitmask. The
-                                 // trap handler writes EC_QUEUE_WAVE_* flags
-                                 // here via MSG_INTERRUPT.
-  uint32_t err_event_id;         // KFD event ID signalled on exception.
+  // Offset to last saved control stack top.
+  uint32_t control_stack_offset;
+  // Saved control stack size in bytes.
+  uint32_t control_stack_size;
+  // Offset to last saved wave state base.
+  uint32_t wave_state_offset;
+  // Saved wave state size in bytes.
+  uint32_t wave_state_size;
+  // Offset to debugger memory (64B aligned).
+  uint32_t debug_offset;
+  // Debugger memory size in bytes (64B aligned).
+  uint32_t debug_size;
+  // GPU VA of the exception reason bitmask.
+  uint64_t err_payload_addr;
+  // KFD event ID signalled on exception.
+  uint32_t err_event_id;
   uint32_t reserved1;
 };
 

@@ -83,10 +83,10 @@ public:
   allocate(Device &dev, size_t size, MemType type,
            MemFlags flags = MemFlags::WRITABLE, void *addr = nullptr);
 
-  // Pin an existing host memory region for device access.
-  static std::expected<Buffer, Error>
-  pin(Device &dev, void *ptr, size_t size,
-      MemFlags flags = MemFlags::WRITABLE | MemFlags::EXECUTABLE);
+  // Returns a pinned copy of the memory region.
+  static std::expected<Buffer, Error> pin(Device &dev, const void *ptr,
+                                          size_t size,
+                                          MemFlags flags = MemFlags::WRITABLE);
 
   // Map this buffer to the device's page tables. Must be done before accessing.
   std::expected<void, Error> map(std::span<Device *const> targets);
@@ -117,6 +117,11 @@ private:
   friend class DMABuffer;
   friend class QueueBase;
   friend class ComputeQueue;
+  friend class Executable;
+
+  // Pin an existing page-aligned mapped region for device access.
+  static std::expected<Buffer, Error>
+  pin_region(Device &dev, detail::MappedRegion region, MemFlags flags);
 
   Buffer(uint64_t h, size_t sz, detail::MappedRegion mapping,
          detail::SmallVector<uint32_t, 2> mapped_ids, Device *dev,

@@ -99,7 +99,8 @@ Event &Event::operator=(Event &&other) {
 }
 
 std::expected<void, Error> Event::wait(uint64_t timeout_ns) {
-  uint32_t timeout_ms = static_cast<uint32_t>(timeout_ns / 1'000'000);
+  uint32_t timeout_ms =
+      detail::max(static_cast<uint32_t>(timeout_ns / 1'000'000), 1u);
   ioctl::kfd::event_data ed{};
   ed.event_id = id;
 
@@ -134,7 +135,8 @@ namespace {
 std::expected<detail::SmallVector<ioctl::kfd::event_data, 8>, Error>
 do_wait_events(std::span<Event *> events, bool wait_for_all,
                uint64_t timeout_ns) {
-  uint32_t timeout_ms = static_cast<uint32_t>(timeout_ns / 1'000'000);
+  uint32_t timeout_ms =
+      detail::max(static_cast<uint32_t>(timeout_ns / 1'000'000), 1u);
   auto n = static_cast<uint32_t>(events.size());
   detail::SmallVector<ioctl::kfd::event_data, 8> eds;
   KFD_CHECK(eds.resize(n));

@@ -150,11 +150,19 @@ std::expected<Buffer, Error> Buffer::allocate(Device &dev, size_t size,
                 std::move(mtx));
 }
 
-std::expected<Buffer, Error> Buffer::pin(Device &dev, void *ptr, size_t size,
-                                         MemFlags flags) {
+std::expected<Buffer, Error> Buffer::pin(Device &dev, const void *ptr,
+                                         size_t size, MemFlags flags) {
+  size_t aligned = align_up(size, page_size());
+  auto region = KFD_TRY(MappedRegion::create(aligned));
+  std::memcpy(region.data(), ptr, size);
+  return pin_region(dev, std::move(region), flags);
+}
+
+std::expected<Buffer, Error>
+Buffer::pin_region(Device &dev, MappedRegion region, MemFlags flags) {
   Context &ctx = dev.context();
-  size = align_up(size, page_size());
-  uintptr_t va_addr = reinterpret_cast<uintptr_t>(ptr);
+  size_t size = region.size();
+  uintptr_t va_addr = reinterpret_cast<uintptr_t>(region.data());
 
   ioctl::kfd::alloc_memory_of_gpu_args alloc_args{
       .va_addr = va_addr,
@@ -169,7 +177,8 @@ std::expected<Buffer, Error> Buffer::pin(Device &dev, void *ptr, size_t size,
       ioctl::call<ioctl::kfd::ALLOC_MEMORY_OF_GPU>(ctx.kfd_fd(), alloc_args));
 
   auto mtx = KFD_TRY(Box<Mutex>::create());
-  return Buffer(alloc_args.handle, size, {}, {}, &dev, std::move(mtx));
+  return Buffer(alloc_args.handle, size, std::move(region), {}, &dev,
+                std::move(mtx));
 }
 
 std::expected<void, Error> Buffer::map(std::span<Device *const> targets) {

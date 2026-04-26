@@ -86,8 +86,8 @@ Executable::load(Device &dev, std::span<const std::byte> image, SDMAQueue &sdma,
   // inter-segment gaps are already correct after the memcpy loop.
   auto staging = KFD_TRY(MappedRegion::create(static_cast<size_t>(footprint)));
 
-  auto pinned =
-      KFD_TRY(Buffer::pin(dev, staging.data(), static_cast<size_t>(footprint)));
+  auto pinned = KFD_TRY(Buffer::pin_region(
+      dev, std::move(staging), MemFlags::WRITABLE | MemFlags::EXECUTABLE));
   KFD_CHECK(pinned.map(dev));
 
   // Copy the program header values into the staging buffer.
@@ -103,7 +103,7 @@ Executable::load(Device &dev, std::span<const std::byte> image, SDMAQueue &sdma,
                         static_cast<unsigned long>(offset),
                         static_cast<unsigned long>(phdr.p_filesz),
                         static_cast<unsigned long>(footprint));
-    std::memcpy(static_cast<char *>(staging.data()) + offset, seg.data(),
+    std::memcpy(static_cast<char *>(pinned.data()) + offset, seg.data(),
                 static_cast<size_t>(phdr.p_filesz));
   }
 
@@ -142,7 +142,7 @@ Executable::load(Device &dev, std::span<const std::byte> image, SDMAQueue &sdma,
                           static_cast<unsigned long>(lo));
 
       const auto *rela_table = reinterpret_cast<const elf::Elf64_Rela *>(
-          static_cast<const char *>(staging.data()) + rela_ptr - lo);
+          static_cast<const char *>(pinned.data()) + rela_ptr - lo);
       size_t count = rela_size / sizeof(elf::Elf64_Rela);
       for (size_t i = 0; i < count; ++i) {
         const auto &rel = rela_table[i];
@@ -152,7 +152,7 @@ Executable::load(Device &dev, std::span<const std::byte> image, SDMAQueue &sdma,
             continue;
           uint64_t off = rel.r_offset - lo;
           if (off + sizeof(uint64_t) <= footprint)
-            std::memcpy(static_cast<char *>(staging.data()) + off, &value,
+            std::memcpy(static_cast<char *>(pinned.data()) + off, &value,
                         sizeof(uint64_t));
         }
       }
@@ -162,7 +162,7 @@ Executable::load(Device &dev, std::span<const std::byte> image, SDMAQueue &sdma,
 
   auto sig = KFD_TRY(Signal::create(dev.context(), /*initial=*/2));
   // SDMA transfer of the entire footprint from staging into VRAM.
-  KFD_CHECK(sdma.copy_linear(img.data(), staging.data(), footprint));
+  KFD_CHECK(sdma.copy_linear(img.data(), pinned.data(), footprint));
   KFD_CHECK(sdma.signal(sig));
 
   // Invalidate instruction and data caches so the CUs fetch fresh code

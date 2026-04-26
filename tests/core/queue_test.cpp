@@ -4,7 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
 #include <ctime>
-#include <sys/mman.h>
+
 #include <thread>
 #include <vector>
 
@@ -459,23 +459,15 @@ TEST_CASE("Queue - WRITE_DATA into pinned user memory", "[queue][memory]") {
       auto sig = kfd::Signal::create(ctx);
       REQUIRE_RESULT(sig);
 
-      size_t sz = kfd::detail::page_size();
-      void *host = ::mmap(nullptr, sz, PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-      REQUIRE(host != MAP_FAILED);
+      uint32_t host_val = 0;
+      auto pinned = kfd::Buffer::pin(gpu, &host_val, sizeof(host_val));
+      REQUIRE_RESULT(pinned);
+      REQUIRE_RESULT(pinned->map(gpu));
 
-      {
-        auto pinned = kfd::Buffer::pin(gpu, host, sz);
-        REQUIRE_RESULT(pinned);
-        REQUIRE_RESULT(pinned->map(gpu));
-
-        REQUIRE_RESULT(queue->write_data(host, 0xDEADBEEF));
-        REQUIRE_RESULT(queue->signal(*sig));
-        REQUIRE_RESULT(
-            sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
-      }
-
-      ::munmap(host, sz);
+      REQUIRE_RESULT(queue->write_data(pinned->data(), 0xDEADBEEF));
+      REQUIRE_RESULT(queue->signal(*sig));
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
     }
   }
 }

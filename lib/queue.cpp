@@ -341,12 +341,13 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
       constexpr MemFlags CWSR_PIN_FLAGS =
           MemFlags::WRITABLE | MemFlags::EXECUTABLE | MemFlags::COHERENT;
       auto bo = KFD_TRY(
-          Buffer::pin(dev, cwsr_region.data(), total_cwsr, CWSR_PIN_FLAGS));
+          Buffer::pin_region(dev, std::move(cwsr_region), CWSR_PIN_FLAGS));
       KFD_CHECK(bo.map(dev));
       cwsr_bo_buf = std::move(bo);
     }
-    cwsr_data = cwsr_region.data();
-    cwsr_buf = std::move(cwsr_region);
+    cwsr_data = cwsr_bo_buf ? cwsr_bo_buf.data() : cwsr_region.data();
+    if (cwsr_region)
+      cwsr_buf = std::move(cwsr_region);
 
     for (uint32_t i = 0; i < num_xcc; ++i) {
       auto *hdr = reinterpret_cast<abi::CwsrHeader *>(
