@@ -100,9 +100,8 @@ int main(int argc, char **argv) {
               dev.get_name().data(), dev.properties().gfx_target_version);
 
   auto compute = KFD_EXPECT(kfd::ComputeQueue::create(dev));
-  auto sdma = KFD_EXPECT(kfd::SDMAQueue::create(dev));
 
-  auto exe = KFD_EXPECT(kfd::Executable::load(dev, file, sdma, compute));
+  auto exe = KFD_EXPECT(kfd::Executable::load(dev, file, compute));
   auto kernel = KFD_EXPECT(exe.kernel("fragment.kd"));
 
   // The DRM backend will override the resolution to match the native mode.
@@ -168,7 +167,7 @@ int main(int argc, char **argv) {
         !ec && t != elf_mtime) {
       elf_mtime = t;
       auto new_file = read_file(argv[1]);
-      exe = KFD_EXPECT(kfd::Executable::load(dev, new_file, sdma, compute));
+      exe = KFD_EXPECT(kfd::Executable::load(dev, new_file, compute));
       kernel = KFD_EXPECT(exe.kernel("fragment.kd"));
       for (uint32_t i = 0; i < NUM_BUFFERS; ++i) {
         fbs[i].kernarg = KFD_EXPECT(kernel.alloc());

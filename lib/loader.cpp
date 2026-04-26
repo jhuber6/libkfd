@@ -41,7 +41,7 @@ void Kernel::fill(Buffer &buf, std::span<const std::byte> explicit_args,
 }
 
 std::expected<Executable, Error>
-Executable::load(Device &dev, std::span<const std::byte> image, SDMAQueue &sdma,
+Executable::load(Device &dev, std::span<const std::byte> image,
                  ComputeQueue &compute) {
   auto region = KFD_TRY(MappedRegion::create(image.size_bytes()));
   std::memcpy(region.data(), image.data(), image.size_bytes());
@@ -160,14 +160,13 @@ Executable::load(Device &dev, std::span<const std::byte> image, SDMAQueue &sdma,
     break;
   }
 
-  auto sig = KFD_TRY(Signal::create(dev.context(), /*initial=*/2));
-  // SDMA transfer of the entire footprint from staging into VRAM.
-  KFD_CHECK(sdma.copy_linear(img.data(), pinned.data(), footprint));
-  KFD_CHECK(sdma.signal(sig));
+  auto sig = KFD_TRY(Signal::create(dev.context(), /*initial=*/1));
+  // DMA transfer of the entire footprint from staging into VRAM.
+  KFD_CHECK(compute.dma_copy(img.data(), pinned.data(),
+                             static_cast<uint32_t>(footprint)));
 
   // Invalidate instruction and data caches so the CUs fetch fresh code
   // from VRAM rather than stale cache lines.
-  KFD_CHECK(compute.wait(sig, Condition::EQ, /*value=*/1));
   KFD_CHECK(compute.acquire_mem());
   KFD_CHECK(compute.signal(sig));
 

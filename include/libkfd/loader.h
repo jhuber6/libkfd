@@ -22,7 +22,6 @@ namespace kfd {
 
 class ComputeQueue;
 class Device;
-class SDMAQueue;
 
 // A representation of an executable kernel on the device. Only valid for the
 // lifetime of the Executable it was obtained from.
@@ -64,10 +63,8 @@ class Executable {
 public:
   using SymbolRange = detail::elf::SymbolRange;
 
-  static std::expected<Executable, Error> load(Device &dev,
-                                               std::span<const std::byte> image,
-                                               SDMAQueue &sdma,
-                                               ComputeQueue &compute);
+  static std::expected<Executable, Error>
+  load(Device &dev, std::span<const std::byte> image, ComputeQueue &compute);
 
   ~Executable() = default;
 

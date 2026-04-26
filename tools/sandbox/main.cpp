@@ -53,13 +53,13 @@ int main(int argc, char **argv) {
   std::printf("GPU: device=0x%04x  gfx=%u\n", dev.properties().device_id,
               dev.properties().gfx_target_version);
 
-  // Create a compute queue for dispatch and an SDMA queue for loading.
+  // Create a compute queue for dispatch and an SDMA queue for copies.
   auto compute = KFD_EXPECT(kfd::ComputeQueue::create(dev));
   auto sdma = KFD_EXPECT(kfd::SDMAQueue::create(dev));
 
   // Load the GPU code object and look up the kernel descriptor.
   auto file = read_file(argv[1]);
-  auto exe = KFD_EXPECT(kfd::Executable::load(dev, file, sdma, compute));
+  auto exe = KFD_EXPECT(kfd::Executable::load(dev, file, compute));
   auto kernel = KFD_EXPECT(exe.kernel("saxpy.kd"));
 
   // Allocate host-visible GTT buffers for the x and y arrays.

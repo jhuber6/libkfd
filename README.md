@@ -111,12 +111,11 @@ monotonically decreasing counter.
 auto ctx  = KFD_EXPECT(kfd::Context::create());
 auto &dev = ctx.devices().front();
 
-// Create a compute queue and an SDMA queue.
+// Create a compute queue.
 auto compute = KFD_EXPECT(kfd::ComputeQueue::create(dev));
-auto sdma    = KFD_EXPECT(kfd::SDMAQueue::create(dev));
 
 // Load a GPU ELF code object and look up a kernel.
-auto exe    = KFD_EXPECT(kfd::Executable::load(dev, elf_bytes, sdma, compute));
+auto exe    = KFD_EXPECT(kfd::Executable::load(dev, elf_bytes, compute));
 auto kernel = KFD_EXPECT(exe.kernel("my_kernel.kd"));
 
 // Allocate and map a GTT buffer for kernel arguments.

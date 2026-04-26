@@ -31,8 +31,7 @@ TEST_CASE("Loader - load succeeds for compatible arch", "[device][loader]") {
 
       INFO("arch: " << fix->bin->arch);
       auto buf = read_file(fix->bin->path);
-      auto loaded =
-          kfd::Executable::load(*fix->gpu, buf, fix->sdma, fix->compute);
+      auto loaded = kfd::Executable::load(*fix->gpu, buf, fix->compute);
       REQUIRE_RESULT(loaded);
       CHECK(loaded->base() != nullptr);
       CHECK(loaded->size() > 0);
@@ -52,8 +51,7 @@ TEST_CASE("Loader - symbol lookup finds known globals", "[device][loader]") {
       REQUIRE_RESULT(fix);
 
       auto buf = read_file(fix->bin->path);
-      auto loaded =
-          kfd::Executable::load(*fix->gpu, buf, fix->sdma, fix->compute);
+      auto loaded = kfd::Executable::load(*fix->gpu, buf, fix->compute);
       REQUIRE_RESULT(loaded);
 
       for (auto name : {"x", "y", "z", "bss_arr"}) {
@@ -77,8 +75,7 @@ TEST_CASE("Loader - symbol lookup returns error for missing symbol",
       REQUIRE_RESULT(fix);
 
       auto buf = read_file(fix->bin->path);
-      auto loaded =
-          kfd::Executable::load(*fix->gpu, buf, fix->sdma, fix->compute);
+      auto loaded = kfd::Executable::load(*fix->gpu, buf, fix->compute);
       REQUIRE_RESULT(loaded);
 
       auto sym = loaded->symbol("nonexistent_symbol_12345");
@@ -87,7 +84,7 @@ TEST_CASE("Loader - symbol lookup returns error for missing symbol",
   }
 }
 
-TEST_CASE("Loader - global values readable via SDMA", "[device][loader]") {
+TEST_CASE("Loader - global values readable via DMA", "[device][loader]") {
   auto &ctx = require_ctx();
   for (size_t di = 0; di < ctx.num_devices(); ++di) {
     DYNAMIC_SECTION("device " << di) {
@@ -98,8 +95,7 @@ TEST_CASE("Loader - global values readable via SDMA", "[device][loader]") {
       REQUIRE_RESULT(fix);
 
       auto buf = read_file(fix->bin->path);
-      auto loaded =
-          kfd::Executable::load(*fix->gpu, buf, fix->sdma, fix->compute);
+      auto loaded = kfd::Executable::load(*fix->gpu, buf, fix->compute);
       REQUIRE_RESULT(loaded);
 
       auto sig = kfd::Signal::create(ctx);
@@ -156,8 +152,7 @@ TEST_CASE("Loader - BSS region is zeroed", "[device][loader]") {
       REQUIRE_RESULT(fix);
 
       auto buf = read_file(fix->bin->path);
-      auto loaded =
-          kfd::Executable::load(*fix->gpu, buf, fix->sdma, fix->compute);
+      auto loaded = kfd::Executable::load(*fix->gpu, buf, fix->compute);
       REQUIRE_RESULT(loaded);
 
       auto bss = loaded->symbol("bss_arr");
@@ -203,8 +198,7 @@ TEST_CASE("Loader - symbols() iterates dynamic symbol names",
       REQUIRE_RESULT(fix);
 
       auto buf = read_file(fix->bin->path);
-      auto loaded =
-          kfd::Executable::load(*fix->gpu, buf, fix->sdma, fix->compute);
+      auto loaded = kfd::Executable::load(*fix->gpu, buf, fix->compute);
       REQUIRE_RESULT(loaded);
 
       auto range = loaded->symbols();
@@ -233,8 +227,7 @@ TEST_CASE("Loader - R_AMDGPU_RELATIVE64 relocations applied",
       REQUIRE_RESULT(fix);
 
       auto buf = read_file(fix->bin->path);
-      auto loaded =
-          kfd::Executable::load(*fix->gpu, buf, fix->sdma, fix->compute);
+      auto loaded = kfd::Executable::load(*fix->gpu, buf, fix->compute);
       REQUIRE_RESULT(loaded);
 
       auto sig = kfd::Signal::create(ctx);

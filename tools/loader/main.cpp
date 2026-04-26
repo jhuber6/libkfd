@@ -246,10 +246,8 @@ int main(int argc, const char **argv, const char **envp) {
   kfd::Device &dev = ctx.devices().front();
 
   kfd::ComputeQueue compute = KFD_EXPECT(kfd::ComputeQueue::create(dev));
-  kfd::SDMAQueue sdma = KFD_EXPECT(kfd::SDMAQueue::create(dev));
 
-  kfd::Executable exe =
-      KFD_EXPECT(kfd::Executable::load(dev, file, sdma, compute));
+  kfd::Executable exe = KFD_EXPECT(kfd::Executable::load(dev, file, compute));
 
   kfd::Kernel begin = KFD_EXPECT(exe.kernel("_begin.kd"));
   kfd::Kernel start = KFD_EXPECT(exe.kernel("_start.kd"));

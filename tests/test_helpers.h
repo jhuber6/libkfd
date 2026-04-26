@@ -155,7 +155,7 @@ make_device_fixture(kfd::Device &dev, std::span<const TestBinary> kernels) {
   auto sdma = KFD_TRY(create_queue<kfd::SDMAQueue>(dev));
   auto compute = KFD_TRY(create_queue<kfd::ComputeQueue>(dev));
   auto buf = read_file(bin->path);
-  auto exe = KFD_TRY(kfd::Executable::load(dev, buf, sdma, compute));
+  auto exe = KFD_TRY(kfd::Executable::load(dev, buf, compute));
   return DeviceFixture{&dev, std::move(exe), bin, std::move(sdma),
                        std::move(compute)};
 }
