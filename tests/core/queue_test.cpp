@@ -748,6 +748,133 @@ TEST_CASE("Queue - custom release_mem writeback-only fence",
   }
 }
 
+TEST_CASE("Queue - COPY_DATA GPU clock read", "[queue][copy_data]") {
+  auto &ctx = require_ctx();
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = require_gpu(ctx, di);
+
+      auto queue = kfd::ComputeQueue::create(gpu);
+      REQUIRE_RESULT(queue);
+
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
+
+      auto buf = alloc_host_buffer(gpu);
+      auto *ts = static_cast<volatile uint64_t *>(buf.data());
+      *ts = 0;
+
+      REQUIRE_RESULT(queue->read_gpu_clock(buf.data()));
+      REQUIRE_RESULT(queue->signal(*sig));
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+
+      CHECK(*ts != 0);
+    }
+  }
+}
+
+TEST_CASE("Queue - COPY_DATA memory read-back", "[queue][copy_data]") {
+  auto &ctx = require_ctx();
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = require_gpu(ctx, di);
+
+      auto queue = kfd::ComputeQueue::create(gpu);
+      REQUIRE_RESULT(queue);
+
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
+
+      auto buf = alloc_host_buffer(gpu, 2 * kfd::detail::page_size());
+      auto *src = static_cast<uint32_t *>(buf.data());
+      auto *dst = src + (kfd::detail::page_size() / sizeof(uint32_t));
+      *dst = 0;
+
+      REQUIRE_RESULT(queue->write_data(src, 0xDEADBEEF));
+      REQUIRE_RESULT(queue->copy_data(
+          kfd::pm4::COPY_SRC_TC_L2, reinterpret_cast<uintptr_t>(src),
+          kfd::pm4::COPY_DST_MEM, reinterpret_cast<uintptr_t>(dst)));
+      REQUIRE_RESULT(queue->signal(*sig));
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+
+      CHECK(*src == 0xDEADBEEF);
+      CHECK(*dst == 0xDEADBEEF);
+    }
+  }
+}
+
+TEST_CASE("Queue - COPY_DATA 64-bit memory read-back", "[queue][copy_data]") {
+  auto &ctx = require_ctx();
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = require_gpu(ctx, di);
+
+      auto queue = kfd::ComputeQueue::create(gpu);
+      REQUIRE_RESULT(queue);
+
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
+
+      auto buf = alloc_host_buffer(gpu, 2 * kfd::detail::page_size());
+      auto *src = static_cast<uint64_t *>(buf.data());
+      auto *dst = reinterpret_cast<uint64_t *>(static_cast<char *>(buf.data()) +
+                                               kfd::detail::page_size());
+      *src = 0;
+      *dst = 0;
+
+      constexpr uint64_t PATTERN = 0xCAFEBABE'DEADBEEF;
+      REQUIRE_RESULT(queue->write_data(src, kfd::detail::lo(PATTERN)));
+      REQUIRE_RESULT(queue->write_data(reinterpret_cast<uint32_t *>(src) + 1,
+                                       kfd::detail::hi(PATTERN)));
+      REQUIRE_RESULT(queue->copy_data(
+          kfd::pm4::COPY_SRC_TC_L2, reinterpret_cast<uintptr_t>(src),
+          kfd::pm4::COPY_DST_MEM, reinterpret_cast<uintptr_t>(dst), true));
+      REQUIRE_RESULT(queue->signal(*sig));
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+
+      CHECK(*src == PATTERN);
+      CHECK(*dst == PATTERN);
+    }
+  }
+}
+
+TEST_CASE("Queue - COPY_DATA GPU clock monotonicity", "[queue][copy_data]") {
+  auto &ctx = require_ctx();
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = require_gpu(ctx, di);
+
+      auto queue = kfd::ComputeQueue::create(gpu);
+      REQUIRE_RESULT(queue);
+
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
+
+      constexpr size_t N = 4;
+      auto buf = alloc_host_buffer(gpu, N * sizeof(uint64_t));
+      auto *stamps = static_cast<volatile uint64_t *>(buf.data());
+      for (size_t i = 0; i < N; ++i)
+        stamps[i] = 0;
+
+      for (size_t i = 0; i < N; ++i)
+        REQUIRE_RESULT(
+            queue->read_gpu_clock(static_cast<uint64_t *>(buf.data()) + i));
+
+      REQUIRE_RESULT(queue->signal(*sig));
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+
+      for (size_t i = 0; i < N; ++i)
+        CHECK(stamps[i] != 0);
+      for (size_t i = 1; i < N; ++i)
+        CHECK(stamps[i] >= stamps[i - 1]);
+    }
+  }
+}
+
 TEST_CASE("Queue - custom release_mem timestamp", "[queue][custom]") {
   auto &ctx = require_ctx();
   for (size_t di = 0; di < ctx.num_devices(); ++di) {

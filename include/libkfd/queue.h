@@ -250,6 +250,25 @@ public:
     return base.submit(buf, pm4::ATOMIC_MEM_DWORDS);
   }
 
+  std::expected<void, Error>
+  copy_data(pm4::CopyDataSrcSel src_sel, uint64_t src_addr,
+            pm4::CopyDataDstSel dst_sel, uint64_t dst_addr,
+            bool count_64 = false, bool wr_confirm = true,
+            pm4::CachePolicy src_policy = pm4::POLICY_LRU,
+            pm4::CachePolicy dst_policy = pm4::POLICY_LRU) {
+    uint32_t buf[pm4::COPY_DATA_DWORDS];
+    pm4::copy_data(buf, src_sel, src_addr, dst_sel, dst_addr, count_64,
+                   wr_confirm, src_policy, dst_policy);
+    return base.submit(buf, pm4::COPY_DATA_DWORDS);
+  }
+
+  // Snapshot the GPU's free-running clock counter to an 8-byte-aligned address.
+  std::expected<void, Error> read_gpu_clock(void *dst) {
+    uint32_t buf[pm4::COPY_DATA_DWORDS];
+    pm4::copy_data_gpu_clock(buf, dst);
+    return base.submit(buf, pm4::COPY_DATA_DWORDS);
+  }
+
   // Dispatches a kernel launch onto the queue.
   std::expected<void, Error> dispatch(const Kernel &kernel,
                                       const DispatchConfig &cfg,

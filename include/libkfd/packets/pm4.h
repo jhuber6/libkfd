@@ -51,6 +51,7 @@ enum Opcode : uint8_t {
   DMA_DATA = 0x50,
   ACQUIRE_MEM = 0x58,
   INDIRECT_BUFFER = 0x3F,
+  COPY_DATA = 0x40,
   SET_SH_REG = 0x76,
 };
 
@@ -150,17 +151,114 @@ inline void nop_fill(uint32_t *out, uint32_t dwords) {
 }
 
 // L2 cache allocation policy. Shared field encoding at bits [26:25] across
-// RELEASE_MEM, ATOMIC_MEM, WRITE_DATA, and WAIT_REG_MEM.
+// RELEASE_MEM, ATOMIC_MEM, WRITE_DATA, WAIT_REG_MEM, and COPY_DATA.
+// COPY_DATA also uses this encoding at bits [14:13] for its source policy.
 //
 // GFX9 (soc15d.h) and GFX10+ (nvd.h) share the same encoding and position.
 //
-// References: PACKET3_RELEASE_MEM_CACHE_POLICY in amdgpu/nvd.h
+// References: PACKET3_RELEASE_MEM_CACHE_POLICY in amdgpu/nvd.h;
+//             PACKET3_COPY_DATA__SRC_CACHE_POLICY, DST_CACHE_POLICY
 enum CachePolicy : uint32_t {
   POLICY_LRU = 0,    // Normal cached (default)
   POLICY_STREAM = 1, // Streaming (evict before others)
   POLICY_NOA = 2,    // No-allocate (write-through, skip L2 allocation)
   POLICY_BYPASS = 3, // Skip L2 entirely, go to memory controller
 };
+
+// COPY_DATA - copy a 32- or 64-bit value between registers, memory, and
+// internal CP data sources (GPU clock, perf counters, atomic return data).
+//
+// Packet layout (6 dwords):
+//   [0]  header       - IT_COPY_DATA, count = 4
+//   [1]  control      - src_sel[3:0], dst_sel[11:8], src_cache_policy[14:13],
+//                        count_sel[16], wr_confirm[20],
+//                        dst_cache_policy[26:25], pq_exe_status[29]
+//   [2]  src_addr_lo  - source register offset, memory address low, or
+//                        immediate data (depends on src_sel)
+//   [3]  src_addr_hi  - source memory address high (or 0 for registers,
+//                        immediate, clock)
+//   [4]  dst_addr_lo  - destination register offset or memory address low
+//   [5]  dst_addr_hi  - destination memory address high (or 0 for registers)
+//
+// When src_sel = GPU_CLOCK_COUNT, the CP snapshots its 64-bit free-running
+// GPU clock counter. When src_sel = SYSTEM_CLOCK_COUNT (GFX10+), it reads
+// the system clock instead. count_sel = 1 selects a 64-bit transfer.
+//
+// For memory destinations (dst_sel = MEM on GFX9, or TC_L2 on GFX10+), the
+// address must be 4-byte aligned for 32-bit or 8-byte aligned for 64-bit.
+// wr_confirm = 1 stalls the CP until the write is visible in memory.
+//
+// References: PACKET3_COPY_DATA in amdgpu/soc15d.h, amdgpu/nvd.h;
+//             gfx_v9_0_ring_emit_rreg; gfx_v10_0_ring_emit_rreg;
+//             gfx_v9_0_kiq_read_clock (src_sel = GPU_CLOCK_COUNT)
+
+// Source selector for COPY_DATA control[3:0].
+//
+// References: PACKET3_COPY_DATA__SRC_SEL__* in amdgpu/soc15d.h, nvd.h
+enum CopyDataSrcSel : uint32_t {
+  COPY_SRC_REG = 0,           // Memory-mapped register
+  COPY_SRC_MEM = 1,           // Memory (GFX9); TC_L2_OBSOLETE (GFX10+)
+  COPY_SRC_TC_L2 = 2,         // Through TC / L2
+  COPY_SRC_GDS = 3,           // Global Data Share
+  COPY_SRC_PERF = 4,          // Performance counters
+  COPY_SRC_IMM = 5,           // Immediate data in DW2 (32b) or DW2:DW3 (64b)
+  COPY_SRC_ATOMIC_RTN = 6,    // Atomic return data (from prior ATOMIC_MEM)
+  COPY_SRC_GDS_ATOMIC_0 = 7,  // GDS atomic return data 0
+  COPY_SRC_GDS_ATOMIC_1 = 8,  // GDS atomic return data 1
+  COPY_SRC_GPU_CLOCK = 9,     // GPU clock counter (always 64-bit)
+  COPY_SRC_SYSTEM_CLOCK = 10, // System clock counter (GFX10+, 64-bit)
+};
+
+// Destination selector for COPY_DATA control[11:8].
+//
+// GFX9 uses dst_sel=5 for "memory" (direct to MC). GFX10+ renames that
+// slot to "TC_L2_OBSOLETE" but the encoding still works; the kernel driver
+// uses dst_sel=5 on all generations. dst_sel=2 (TC_L2) routes through L2.
+//
+// References: PACKET3_COPY_DATA__DST_SEL__* in amdgpu/soc15d.h, nvd.h
+enum CopyDataDstSel : uint32_t {
+  COPY_DST_REG = 0,   // Memory-mapped register
+  COPY_DST_TC_L2 = 2, // Through TC / L2
+  COPY_DST_GDS = 3,   // Global Data Share (uncommon)
+  COPY_DST_PERF = 4,  // Performance counters
+  COPY_DST_MEM = 5,   // Memory (direct to MC on GFX9; still works on GFX10+)
+};
+
+inline constexpr uint32_t COPY_DATA_DWORDS = 6;
+
+inline uint32_t copy_data(uint32_t *out, CopyDataSrcSel src_sel,
+                          uint64_t src_addr, CopyDataDstSel dst_sel,
+                          uint64_t dst_addr, bool count_64 = false,
+                          bool wr_confirm = true,
+                          CachePolicy src_policy = POLICY_LRU,
+                          CachePolicy dst_policy = POLICY_LRU) {
+  out[0] = header(COPY_DATA, 4);
+  out[1] = (static_cast<uint32_t>(src_sel) & 0xFu) |
+           ((static_cast<uint32_t>(dst_sel) & 0xFu) << 8) |
+           ((static_cast<uint32_t>(src_policy) & 0x3u) << 13) |
+           (count_64 ? (1u << 16) : 0u) | (wr_confirm ? (1u << 20) : 0u) |
+           ((static_cast<uint32_t>(dst_policy) & 0x3u) << 25);
+  out[2] = detail::lo(src_addr);
+  out[3] = detail::hi(src_addr);
+  out[4] = detail::lo(dst_addr);
+  out[5] = detail::hi(dst_addr);
+  return COPY_DATA_DWORDS;
+}
+
+// Read the GPU's free-running clock counter (64-bit) to a memory address.
+// The destination must be 8-byte aligned.
+inline uint32_t copy_data_gpu_clock(uint32_t *out, void *dst_addr) {
+  return copy_data(out, COPY_SRC_GPU_CLOCK, 0, COPY_DST_MEM,
+                   reinterpret_cast<uintptr_t>(dst_addr), true);
+}
+
+// Read a single 32-bit memory-mapped register to a memory address.
+// 'reg_offset' is the register's MMIO offset (not relative to any base).
+inline uint32_t copy_data_read_reg(uint32_t *out, uint32_t reg_offset,
+                                   void *dst_addr) {
+  return copy_data(out, COPY_SRC_REG, static_cast<uint64_t>(reg_offset),
+                   COPY_DST_MEM, reinterpret_cast<uintptr_t>(dst_addr));
+}
 
 // WRITE_DATA - CP stores one or more 32-bit values to a GPU-visible address.
 //
