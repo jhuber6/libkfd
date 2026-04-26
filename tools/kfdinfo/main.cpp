@@ -9,8 +9,11 @@
 #include "libkfd/detail/elf.h"
 #include "libkfd/topology.h"
 
+#include <amdgpu.h>
+
 #include <cstdio>
 #include <cstdlib>
+#include <fcntl.h>
 #include <unistd.h>
 
 namespace {
@@ -62,8 +65,24 @@ const char *link_type_name(uint32_t type) {
     return "AMBA";
   case 4:
     return "MIPI";
+  case 5:
+    return "QPI";
+  case 8:
+    return "RapidIO";
+  case 9:
+    return "InfiniBand";
   case 11:
     return "XGMI";
+  case 12:
+    return "XGOP";
+  case 13:
+    return "GZ";
+  case 14:
+    return "Ethernet RDMA";
+  case 15:
+    return "RDMA";
+  case 16:
+    return "Other";
   default:
     return "Unknown";
   }
@@ -116,13 +135,67 @@ void print_section(const char *title) {
   std::printf("\n  %s%s%s\n", y(), title, r());
 }
 
+struct FlagEntry {
+  bool active;
+  const char *name;
+};
+
+int format_flags(char *buf, size_t len, std::span<const FlagEntry> entries) {
+  char *p = buf;
+  char *end = buf + len;
+  bool any = false;
+  for (const auto &e : entries) {
+    if (!e.active)
+      continue;
+    p += std::snprintf(p, static_cast<size_t>(end - p), "%s%s",
+                       any ? ", " : "(", e.name);
+    any = true;
+  }
+  if (any)
+    p += std::snprintf(p, static_cast<size_t>(end - p), ")");
+  else
+    *buf = '\0';
+  return static_cast<int>(p - buf);
+}
+
+bool query_marketing_name(uint32_t render_minor, char *buf, size_t len) {
+  char path[128];
+  std::snprintf(path, sizeof(path), "/dev/dri/renderD%u", render_minor);
+  int fd = ::open(path, O_RDWR | O_CLOEXEC);
+  if (fd < 0)
+    return false;
+
+  amdgpu_device_handle dev;
+  uint32_t drm_major, drm_minor;
+  if (amdgpu_device_initialize(fd, &drm_major, &drm_minor, &dev)) {
+    ::close(fd);
+    return false;
+  }
+
+  const char *name = amdgpu_get_marketing_name(dev);
+  bool found = name && *name;
+  if (found)
+    std::snprintf(buf, len, "%s", name);
+
+  amdgpu_device_deinitialize(dev);
+  ::close(fd);
+  return found;
+}
+
 void print_node(const kfd::NodeInfo &node, uint32_t index) {
   const auto &p = node.props;
   using namespace kfd::detail;
 
   char gfx_str[32];
   elf::format_gfx_version(gfx_str, sizeof(gfx_str), p.gfx_target_version);
-  auto name = elf::get_name(elf::get_mach(p.gfx_target_version));
+
+  char marketing[128] = {};
+  bool has_marketing =
+      query_marketing_name(p.drm_render_minor, marketing, sizeof(marketing));
+
+  uint32_t generic_mach = elf::get_generic_for_gpu(p.gfx_target_version);
+  auto generic_name =
+      generic_mach ? elf::get_name(generic_mach) : std::string_view{};
 
   // Decode PCI BDF from location_id.
   uint32_t bus = (p.location_id >> 8) & 0xff;
@@ -138,10 +211,13 @@ void print_node(const kfd::NodeInfo &node, uint32_t index) {
   std::printf("\n%s%s=== GPU %u ===%s\n", b(), c(), index, r());
 
   print_section("Identity");
-  if (!name.empty())
-    print_field("Name:", "%s%.*s%s", g(), static_cast<int>(name.size()),
-                name.data(), r());
+  if (has_marketing)
+    print_field("Name:", "%s%s%s", g(), marketing, r());
   print_field("ISA:", "%s%s%s", g(), gfx_str, r());
+  if (!generic_name.empty())
+    print_field("Compatible:", "%s%.*s%s", g(),
+                static_cast<int>(generic_name.size()), generic_name.data(),
+                r());
   print_field("Device ID:", "0x%04x", p.device_id);
   print_field("Vendor ID:", "0x%04x", p.vendor_id);
   if (p.family_id)
@@ -202,6 +278,10 @@ void print_node(const kfd::NodeInfo &node, uint32_t index) {
         std::printf("  %u-bit", bank.width);
       if (bank.mem_clk_max)
         std::printf("  %u MHz", bank.mem_clk_max);
+      if (bank.flags & kfd::MemoryBank::FLAG_HOT_PLUGGABLE)
+        std::printf("  hot-plug");
+      if (bank.flags & kfd::MemoryBank::FLAG_NON_VOLATILE)
+        std::printf("  non-volatile");
       std::putchar('\n');
     }
   }
@@ -249,21 +329,68 @@ void print_node(const kfd::NodeInfo &node, uint32_t index) {
         std::printf("  BW=%u-%u MB/s", link.min_bandwidth, link.max_bandwidth);
       if (link.min_latency || link.max_latency)
         std::printf("  lat=%u-%u ns", link.min_latency, link.max_latency);
+      if (link.flags & kfd::IoLink::FLAG_ENABLED) {
+        using L = kfd::IoLink;
+        char flags_buf[64];
+        const FlagEntry link_flags[] = {
+            {!(link.flags & L::FLAG_NON_COHERENT), "coherent"},
+            {!(link.flags & (L::FLAG_NO_ATOMICS_32 | L::FLAG_NO_ATOMICS_64)),
+             "atomics"},
+            {!(link.flags & L::FLAG_NO_P2P_DMA), "p2p"},
+        };
+        format_flags(flags_buf, sizeof(flags_buf), link_flags);
+        if (*flags_buf)
+          std::printf("  %s%s%s", d(), flags_buf, r());
+      }
       std::putchar('\n');
     }
   }
 
   print_section("Capabilities");
+  using Cap = kfd::NodeProperties;
+
   print_field("CWSR Size:", "%g KiB", p.cwsr_size / 1024.0);
   print_field("Ctl Stack Size:", "%g KiB", p.ctl_stack_size / 1024.0);
-  print_field("Capability:", "0x%08x", p.capability);
-  if (p.capability2)
-    print_field("Capability2:", "0x%08x", p.capability2);
-  if (p.debug_prop)
-    print_field("Debug Properties:", "0x%08x", p.debug_prop);
-  bool sram_ecc =
-      p.capability & kfd::NodeProperties::NODE_CAP_SRAM_EDCSUPPORTED;
-  print_field("SRAM ECC:", "%s", sram_ecc ? "Yes" : "No");
+
+  uint32_t cap = p.capability;
+  print_field("SVM:", "%s",
+              (cap & Cap::NODE_CAP_SVMAPI_SUPPORTED) ? "Yes" : "No");
+  print_field("SRAM ECC:", "%s",
+              (cap & Cap::NODE_CAP_SRAM_EDCSUPPORTED) ? "Yes" : "No");
+  if (cap & Cap::CAP_MEM_EDCSUPPORTED)
+    print_field("MEM ECC:", "Yes");
+
+  if (cap & Cap::CAP_WATCHPOINTS_SUPPORTED) {
+    uint32_t wp_count = (cap & Cap::CAP_WATCHPOINTS_COUNT_MASK) >>
+                        Cap::CAP_WATCHPOINTS_COUNT_SHIFT;
+    print_field("Watchpoints:", "%u", wp_count);
+  }
+
+  if (cap & Cap::CAP_TRAP_DEBUG) {
+    char flags_buf[128];
+    const FlagEntry trap_flags[] = {
+        {!!(cap & Cap::CAP_TRAP_DEBUG_FW), "FW"},
+        {!!(cap & Cap::CAP_TRAP_DEBUG_PRECISE_MEM), "Precise Mem"},
+        {!!(cap & Cap::CAP_TRAP_DEBUG_PRECISE_ALU), "Precise ALU"},
+        {!!(cap & Cap::CAP_TRAP_DEBUG_WAVE_OVERRIDE), "Wave Override"},
+        {!!(cap & Cap::CAP_TRAP_DEBUG_WAVE_MODE), "Wave Mode"},
+    };
+    format_flags(flags_buf, sizeof(flags_buf), trap_flags);
+    if (*flags_buf)
+      print_field("Trap Debug:", "Yes %s", flags_buf);
+    else
+      print_field("Trap Debug:", "Yes");
+  }
+
+  if (cap & Cap::CAP_PER_QUEUE_RESET)
+    print_field("Per-Queue Reset:", "Yes");
+  if (p.capability2 & Cap::CAP2_PER_SDMA_QUEUE_RESET)
+    print_field("Per-SDMA-Queue Reset:", "Yes");
+
+  if (p.debug_prop & Cap::DBG_DISPATCH_INFO_ALWAYS_VALID)
+    print_field("Dispatch Info Valid:", "Yes");
+  if (p.debug_prop & Cap::DBG_WATCHPOINTS_EXCLUSIVE)
+    print_field("Exclusive Watchpoints:", "Yes");
 }
 
 } // namespace

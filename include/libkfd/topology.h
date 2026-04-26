@@ -99,9 +99,31 @@ struct NodeProperties {
   // Shared ID for XGMI-connected GPU hive.
   uint64_t hive_id;
 
-  // Constant capability bits in the node properties.
+  // Capability bit constants (from kfd_sysfs.h HSA_CAP_*).
+  static constexpr uint32_t CAP_WATCHPOINTS_SUPPORTED = 0x00000080;
+  static constexpr uint32_t CAP_WATCHPOINTS_COUNT_MASK = 0x00000f00;
+  static constexpr uint32_t CAP_WATCHPOINTS_COUNT_SHIFT = 8;
+  static constexpr uint32_t CAP_DOORBELL_TYPE_MASK = 0x00003000;
+  static constexpr uint32_t CAP_DOORBELL_TYPE_SHIFT = 12;
+  static constexpr uint32_t CAP_TRAP_DEBUG = 0x00008000;
+  static constexpr uint32_t CAP_TRAP_DEBUG_WAVE_OVERRIDE = 0x00010000;
+  static constexpr uint32_t CAP_TRAP_DEBUG_WAVE_MODE = 0x00020000;
+  static constexpr uint32_t CAP_TRAP_DEBUG_PRECISE_MEM = 0x00040000;
+  static constexpr uint32_t CAP_MEM_EDCSUPPORTED = 0x00100000;
+  static constexpr uint32_t CAP_ASIC_REVISION_MASK = 0x03c00000;
+  static constexpr uint32_t CAP_ASIC_REVISION_SHIFT = 22;
   static constexpr uint32_t NODE_CAP_SRAM_EDCSUPPORTED = 0x04000000;
   static constexpr uint32_t NODE_CAP_SVMAPI_SUPPORTED = 0x08000000;
+  static constexpr uint32_t CAP_TRAP_DEBUG_FW = 0x20000000;
+  static constexpr uint32_t CAP_TRAP_DEBUG_PRECISE_ALU = 0x40000000;
+  static constexpr uint32_t CAP_PER_QUEUE_RESET = 0x80000000;
+
+  // Capability2 bit constants (from kfd_sysfs.h HSA_CAP2_*).
+  static constexpr uint32_t CAP2_PER_SDMA_QUEUE_RESET = 0x00000001;
+
+  // Debug property bit constants (from kfd_sysfs.h HSA_DBG_*).
+  static constexpr uint32_t DBG_DISPATCH_INFO_ALWAYS_VALID = 0x00000400;
+  static constexpr uint32_t DBG_WATCHPOINTS_EXCLUSIVE = 0x00000800;
 };
 
 struct MemoryBank {
@@ -113,6 +135,9 @@ struct MemoryBank {
   uint64_t size_in_bytes;
   // HSA_MEMORYPROPERTY flags (hot-pluggable, non-volatile, etc.).
   uint32_t flags;
+
+  static constexpr uint32_t FLAG_HOT_PLUGGABLE = 0x01;
+  static constexpr uint32_t FLAG_NON_VOLATILE = 0x02;
   // Bus width in bits.
   uint32_t width;
   // Maximum memory clock in MHz.
@@ -157,6 +182,12 @@ struct IoLink {
   uint32_t max_bandwidth;
   // HSA_LINKPROPERTY flags (coherent, atomics, P2P DMA, etc.).
   uint32_t flags;
+
+  static constexpr uint32_t FLAG_ENABLED = 0x01;
+  static constexpr uint32_t FLAG_NON_COHERENT = 0x02;
+  static constexpr uint32_t FLAG_NO_ATOMICS_32 = 0x04;
+  static constexpr uint32_t FLAG_NO_ATOMICS_64 = 0x08;
+  static constexpr uint32_t FLAG_NO_P2P_DMA = 0x10;
 };
 
 struct NodeInfo {
