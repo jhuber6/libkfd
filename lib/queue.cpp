@@ -658,6 +658,18 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
                                                   const DispatchConfig &cfg,
                                                   const Buffer &kernarg) {
   const abi::KernelDescriptor &kd = kernel.descriptor();
+
+  if (cooperative) {
+    const auto &p = base.dev->properties();
+    uint32_t simd_per_cu = p.simd_per_cu ? p.simd_per_cu : 1;
+    uint32_t num_cus = p.simd_count / simd_per_cu;
+    uint32_t cus_needed = abi::occupancy(p, base.dev->gfx_version(), kd, cfg);
+    if (cus_needed > num_cus)
+      return kfd::unexpected(
+          EINVAL, "cooperative launch needs %u CUs but device has %u",
+          cus_needed, num_cus);
+  }
+
   uint32_t private_segment_size = cfg.private_segment_size;
   if (!(kd.kernel_code_properties & abi::USES_DYNAMIC_STACK))
     private_segment_size = kd.private_segment_fixed_size;
@@ -714,10 +726,10 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
 
   void *va = __atomic_load_n(&sctx->scratch_va, __ATOMIC_RELAXED);
   uint32_t tmpring = __atomic_load_n(&sctx->scratch_tmpring, __ATOMIC_RELAXED);
-  n += pm4::build_dispatch_setup(buf + n, base.dev->gfx_version(), kd,
-                                 kernel.address(), cfg.grid, cfg.block,
-                                 kernarg.data(), dispatch_pkt_addr, va, tmpring,
-                                 cfg.dynamic_lds, private_segment_size);
+  n += pm4::build_dispatch_setup(
+      buf + n, base.dev->gfx_version(), kd, kernel.address(), cfg.grid,
+      cfg.block, kernarg.data(), dispatch_pkt_addr, va, tmpring,
+      cfg.dynamic_lds, private_segment_size, cooperative);
 
   // Here we are either waiting for a scratch allocation or stalled behind
   // another kernel that is. We already encoded the scratch base so we use an
@@ -747,6 +759,29 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
       pm4::dispatch_initiator(kd, base.dev->gfx_version()));
 
   return base.submit_impl(buf, n);
+}
+
+std::expected<CooperativeQueue, Error>
+CooperativeQueue::create(Device &dev, size_t ring_size, uint32_t target_xcc) {
+  auto cq = KFD_TRY(ComputeQueue::create(dev, ring_size, target_xcc));
+
+  // GFX12+ uses GLG_EN in the dispatch packet itself, otherwise we need the GWS
+  // ioctl to mark the queue as exclusively scheduled (non-preemptible).
+  if (dev.gfx_version() < abi::GFX_VERSION_GFX12) {
+    if (dev.properties().num_gws == 0)
+      return kfd::unexpected(ENOTSUP,
+                             "device does not support cooperative launch");
+
+    ioctl::kfd::alloc_queue_gws_args gws{};
+    gws.queue_id = cq.queue_id();
+    gws.num_gws = 1;
+    auto r =
+        ioctl::call<ioctl::kfd::ALLOC_QUEUE_GWS>(dev.context().kfd_fd(), gws);
+    if (!r)
+      return kfd::unexpected(r.error());
+  }
+
+  return CooperativeQueue(std::move(cq));
 }
 
 // SDMA queues execute packets in-order to copy between PCI-e or XGMI.

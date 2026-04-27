@@ -11,6 +11,7 @@
 
 #include "libkfd/detail/utility.h"
 #include "libkfd/dispatch.h"
+#include "libkfd/topology.h"
 
 #include <cstdint>
 #include <cstring>
@@ -39,6 +40,12 @@ constexpr uint32_t gfx_version_step(uint32_t v) { return v % 100; }
 
 // COMPUTE_PGM_RSRC1 bit 20: launch waves with STATUS.PRIV=1.
 inline constexpr uint32_t COMPUTE_PGM_RSRC1_PRIV = 1u << 20;
+// COMPUTE_PGM_RSRC1 bit 29: Pair two CUs into a single work-group-processor.
+inline constexpr uint32_t COMPUTE_PGM_RSRC1_WGP = 1u << 29;
+
+// COMPUTE_PGM_RSRC3 bit 13: group launch guarantee (GFX12+).
+// When set, the SPI ensures all workgroups in the dispatch are co-resident.
+inline constexpr uint32_t COMPUTE_PGM_RSRC3_GLG_EN = 1u << 13;
 
 // GFX11.0.x has a HW defect that suppresses CWSR, under PRIV=1, s_trap 2 is
 // interpreted as a NOP on these chips. However LLVM has a software work-around
@@ -369,6 +376,75 @@ inline void fill_dispatch_packet(DispatchPacket &pkt, Dim3 grid, Dim3 block,
       static_cast<uint32_t>(static_cast<uint64_t>(block.z) * grid.z);
   pkt.private_segment_size = private_size;
   pkt.group_segment_size = group_size;
+}
+
+// Maximum concurrent blocks per physical CU for the given kernel and block
+// size. Accounts for register usage, wave-slot limits, and LDS.
+inline uint32_t blocks_per_cu(const NodeProperties &props, uint32_t gfx_version,
+                              const KernelDescriptor &kd, Dim3 block,
+                              uint32_t dynamic_lds = 0) {
+  uint32_t simd_per_cu = props.simd_per_cu ? props.simd_per_cu : 1;
+  uint32_t wave_size =
+      (kd.kernel_code_properties & ENABLE_WAVEFRONT_SIZE32) ? 32 : 64;
+  uint32_t max_waves = props.max_waves_per_simd ? props.max_waves_per_simd : 8;
+
+  // VGPR occupancy, COMPUTE_PGM_RSRC1[5:0] encodes allocated VGPRs with a
+  // generation-dependent granularity. Wave64 on RDNA consumes two physical
+  // wave32 slots so the normal numbers are halved.
+  uint32_t granulated_vgprs = kd.compute_pgm_rsrc1 & 0x3F;
+  uint32_t vgpr_granule, total_vgprs;
+  bool wave64_on_rdna = gfx_version >= GFX_VERSION_GFX10_1 && wave_size == 64;
+  if (gfx_version >= GFX_VERSION_GFX10_1) {
+    vgpr_granule = wave64_on_rdna ? 4 : 8;
+    total_vgprs = wave64_on_rdna ? 512 : 1024;
+  } else {
+    vgpr_granule = 4;
+    total_vgprs = 256;
+  }
+  uint32_t used_vgprs = (granulated_vgprs + 1) * vgpr_granule;
+  uint32_t vgpr_waves = used_vgprs > 0 ? total_vgprs / used_vgprs : max_waves;
+
+  // SGPR occupancy, SGPRs do not affect occupancy in GFX10+ so only GFX9
+  // needs this limit.
+  uint32_t gpr_waves = detail::min(vgpr_waves, max_waves);
+  if (gfx_version < GFX_VERSION_GFX10_1) {
+    uint32_t granulated_sgprs = (kd.compute_pgm_rsrc1 >> 6) & 0xF;
+    uint32_t used_sgprs = (granulated_sgprs + 1) * 8;
+    uint32_t sgpr_waves = 800u / detail::align_up(used_sgprs, 16u);
+    gpr_waves = detail::min(gpr_waves, sgpr_waves);
+  }
+
+  // In WGP mode in GFX10+ pairs two CUs behind one scheduler, doubling the
+  // SIMDs available per physical CU.
+  bool wgp_mode = gfx_version >= GFX_VERSION_GFX10_1 &&
+                  (kd.compute_pgm_rsrc1 & COMPUTE_PGM_RSRC1_WGP);
+  uint32_t simds = wgp_mode ? simd_per_cu * 2 : simd_per_cu;
+  uint32_t waves_per_cu = simds * detail::min(max_waves, gpr_waves);
+
+  uint32_t block_size = block.x * block.y * block.z;
+  uint32_t waves_per_block =
+      detail::align_up(block_size, wave_size) / wave_size;
+  uint32_t result = waves_per_block > 0 ? waves_per_cu / waves_per_block : 0;
+
+  uint32_t kernel_lds = kd.group_segment_fixed_size + dynamic_lds;
+  if (kernel_lds > 0) {
+    uint32_t lds_per_cu = props.lds_size_in_kb * 1024;
+    result = detail::min(result, lds_per_cu / kernel_lds);
+  }
+
+  return result;
+}
+
+// Minimum number of CUs needed to complete the kernel launch.
+inline uint32_t occupancy(const NodeProperties &props, uint32_t gfx_version,
+                          const KernelDescriptor &kd,
+                          const DispatchConfig &cfg) {
+  uint32_t bpc =
+      blocks_per_cu(props, gfx_version, kd, cfg.block, cfg.dynamic_lds);
+  uint32_t total_blocks = cfg.grid.x * cfg.grid.y * cfg.grid.z;
+  if (bpc == 0)
+    return total_blocks > 0 ? static_cast<uint32_t>(-1) : 0;
+  return (total_blocks + bpc - 1) / bpc;
 }
 
 // Total kernarg allocation size including implicit args and dispatch packet.

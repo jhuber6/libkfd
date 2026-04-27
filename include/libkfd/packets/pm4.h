@@ -970,7 +970,8 @@ inline uint32_t build_dispatch_setup(
     const void *entry_addr, Dim3 grid, Dim3 block,
     const void *kernarg_addr = nullptr, const void *dispatch_pkt_addr = nullptr,
     const void *scratch_base = nullptr, uint32_t tmpring_size = 0,
-    uint32_t dynamic_lds = 0, uint32_t private_segment_size = 0) {
+    uint32_t dynamic_lds = 0, uint32_t private_segment_size = 0,
+    bool cooperative = false) {
   uint32_t written = 0;
 
   const uint32_t dims[] = {
@@ -1006,8 +1007,10 @@ inline uint32_t build_dispatch_setup(
   const uint32_t rsrc[] = {rsrc1, rsrc2};
   written += set_sh_reg(out + written, regs::COMPUTE_PGM_RSRC1, rsrc, 2);
 
-  written +=
-      set_sh_reg(out + written, regs::COMPUTE_PGM_RSRC3, kd.compute_pgm_rsrc3);
+  uint32_t rsrc3 = kd.compute_pgm_rsrc3;
+  if (cooperative && gfx_version >= abi::GFX_VERSION_GFX12)
+    rsrc3 |= abi::COMPUTE_PGM_RSRC3_GLG_EN;
+  written += set_sh_reg(out + written, regs::COMPUTE_PGM_RSRC3, rsrc3);
 
   // Occupancy limits and SIMD masks. TMPRING_SIZE is set separately via
   // set_scratch_base so the watcher IB can override it after a resize.

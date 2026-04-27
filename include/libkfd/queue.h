@@ -290,6 +290,7 @@ public:
 
 private:
   friend class Context;
+  friend class CooperativeQueue;
 
   static constexpr uint32_t SIGNAL_DWORDS =
       pm4::RELEASE_MEM_DWORDS + pm4::WAIT_REG_MEM_DWORDS +
@@ -301,6 +302,26 @@ private:
   Buffer eop_seq;
   QueueBase base;
   uint32_t next_eop_seq = 0;
+  bool cooperative = false;
+};
+
+class CooperativeQueue : public ComputeQueue {
+public:
+  static std::expected<CooperativeQueue, Error>
+  create(Device &dev, size_t ring_size = 4ul * detail::page_size(),
+         uint32_t target_xcc = 0);
+
+  ~CooperativeQueue() = default;
+
+  CooperativeQueue(const CooperativeQueue &) = delete;
+  CooperativeQueue &operator=(const CooperativeQueue &) = delete;
+  CooperativeQueue(CooperativeQueue &&) = default;
+  CooperativeQueue &operator=(CooperativeQueue &&) = default;
+
+private:
+  explicit CooperativeQueue(ComputeQueue &&cq) : ComputeQueue(std::move(cq)) {
+    cooperative = true;
+  }
 };
 
 class SDMAQueue {
