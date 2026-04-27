@@ -306,6 +306,11 @@ static float3 cross(float3 a, float3 b) {
   return i - 2.0f * dot(n, i) * n;
 }
 
+static float2 rotate(float2 p, float angle) {
+  float c = cos(angle), s = sin(angle);
+  return (float2){p.x * c - p.y * s, p.x * s + p.y * c};
+}
+
 //===----------------------------------------------------------------------===//
 // Utility
 //===----------------------------------------------------------------------===//

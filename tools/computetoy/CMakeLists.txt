@@ -8,28 +8,36 @@ if(NOT XCB_FOUND AND NOT LIBDRM_FOUND)
   return()
 endif()
 
-# Compile image kernels for every target architecture.
-foreach(arch IN LISTS LIBKFD_GPU_ARCHS)
-  string(REPLACE "-" "_" suffix "${arch}")
-  set(target "plasma_${suffix}")
+# Compile a GPU shader for every target architecture.
+function(add_shader name source)
+  foreach(arch IN LISTS LIBKFD_GPU_ARCHS)
+    string(REPLACE "-" "_" suffix "${arch}")
+    set(target "${name}_${suffix}")
 
-  add_executable(${target} shaders/plasma.c)
-  set_target_properties(${target} PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/kernels")
+    add_executable(${target} ${source})
+    set_target_properties(${target} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/kernels")
 
-  target_compile_options(${target} PRIVATE
-    --target=amdgcn--amdhsa
-    -mcpu=${arch}
-    -nogpulib
-    -nostdlibinc
-    -O2
-  )
+    target_compile_options(${target} PRIVATE
+      --target=amdgcn--amdhsa
+      -mcpu=${arch}
+      -nogpulib
+      -nostdlibinc
+      -O2
+      "SHELL:-Xclang -target-feature"
+      "SHELL:-Xclang +kernarg-preload"
+      "SHELL:-mllvm -amdgpu-kernarg-preload-count=16"
+    )
 
-  target_link_options(${target} PRIVATE
-    --target=amdgcn--amdhsa
-    -mcpu=${arch}
-  )
-endforeach()
+    target_link_options(${target} PRIVATE
+      --target=amdgcn--amdhsa
+      -mcpu=${arch}
+    )
+  endforeach()
+endfunction()
+
+add_shader(plasma shaders/plasma.c)
+add_shader(tunnel shaders/tunnel.c)
 
 add_executable(computetoy main.cpp window.cpp)
 target_link_libraries(computetoy PRIVATE libkfd::kfd)

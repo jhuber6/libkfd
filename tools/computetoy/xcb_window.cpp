@@ -67,7 +67,8 @@ public:
         wm_delete(std::exchange(o.wm_delete, 0)),
         present_special(std::exchange(o.present_special, nullptr)),
         depth(o.depth), num_buffers(o.num_buffers),
-        pixmaps(std::move(o.pixmaps)), busy(std::move(o.busy)) {}
+        pixmaps(std::move(o.pixmaps)), busy(std::move(o.busy)),
+        last_msc(o.last_msc) {}
 
   std::expected<void, kfd::Error> import_buffer(uint32_t index, int dmabuf_fd,
                                                 size_t size,
@@ -136,11 +137,13 @@ public:
   }
 
   void present(uint32_t index) override {
+    uint64_t target = last_msc + 1;
     xcb_present_pixmap(conn, win, pixmaps[index], 0, 0, 0, 0, 0, 0, 0, 0,
-                       XCB_PRESENT_OPTION_NONE, 0, 0, 0, 0, nullptr);
+                       XCB_PRESENT_OPTION_NONE, target, 0, 0, 0, nullptr);
     busy[index] = true;
     xcb_flush(conn);
-    drain_present_events(/*block=*/false);
+    while (last_msc < target)
+      drain_present_events(/*block=*/true);
   }
 
   static std::expected<XCBWindow, kfd::Error> create(uint32_t width,
@@ -166,7 +169,11 @@ private:
       if (!sev)
         break;
       auto *ge = reinterpret_cast<xcb_ge_generic_event_t *>(sev);
-      if (ge->event_type == XCB_PRESENT_EVENT_IDLE_NOTIFY) {
+      if (ge->event_type == XCB_PRESENT_EVENT_COMPLETE_NOTIFY) {
+        auto *comp =
+            reinterpret_cast<xcb_present_complete_notify_event_t *>(sev);
+        last_msc = comp->msc;
+      } else if (ge->event_type == XCB_PRESENT_EVENT_IDLE_NOTIFY) {
         auto *idle = reinterpret_cast<xcb_present_idle_notify_event_t *>(sev);
         for (uint32_t i = 0; i < num_buffers; ++i)
           if (pixmaps[i] == idle->pixmap)
@@ -186,6 +193,7 @@ private:
   uint32_t num_buffers = 0;
   std::unique_ptr<xcb_pixmap_t[]> pixmaps;
   std::unique_ptr<bool[]> busy;
+  uint64_t last_msc = 0;
 };
 
 std::expected<XCBWindow, kfd::Error> XCBWindow::create(uint32_t width,
