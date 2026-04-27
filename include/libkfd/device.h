@@ -8,7 +8,6 @@
 #ifndef LIBKFD_DEVICE_H
 #define LIBKFD_DEVICE_H
 
-#include "libkfd/detail/box.h"
 #include "libkfd/detail/elf.h"
 #include "libkfd/detail/mutex.h"
 #include "libkfd/detail/pool_allocator.h"
@@ -91,7 +90,7 @@ private:
 
   // The MMIO region used to signal the command processor.
   Buffer doorbells;
-  detail::Box<detail::Mutex> doorbell_mtx;
+  detail::Mutex doorbell_mtx;
 
   // Trap handler executable and scratch.
   Buffer trap_tba;

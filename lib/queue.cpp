@@ -420,11 +420,9 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
     return kfd::unexpected(db_slot.error());
   }
 
-  auto mtx = KFD_TRY(detail::Box<detail::Mutex>::create());
   QueueBase q(type, ctx, dev, args.queue_id, std::move(ctl_buf),
               std::move(ring_buf), std::move(eop_buf), std::move(cwsr_buf),
-              std::move(cwsr_bo_buf), *db_slot, std::move(err_ev),
-              std::move(mtx));
+              std::move(cwsr_bo_buf), *db_slot, std::move(err_ev), {});
 
   if (q.err_event) {
     q.err_watch_ctx = KFD_TRY(detail::Box<QueueErrorCtx>::create(
@@ -454,7 +452,7 @@ QueueBase::QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
                      Buffer control, Buffer ring, Buffer eop,
                      detail::MappedRegion cwsr, Buffer cwsr_bo,
                      volatile uint64_t *doorbell, detail::Box<Event> err_event,
-                     detail::Box<detail::Mutex> submit_mtx)
+                     detail::Mutex submit_mtx)
     : type(type), ctx(&ctx), dev(&dev), id(id), control(std::move(control)),
       ring(std::move(ring)), eop(std::move(eop)), cwsr(std::move(cwsr)),
       cwsr_bo(std::move(cwsr_bo)), doorbell(doorbell),
@@ -566,7 +564,7 @@ std::expected<void, Error> QueueBase::wait_for_room(uint32_t dwords) {
 
 std::expected<void, Error> QueueBase::submit(const uint32_t *data,
                                              size_t n_dwords) {
-  detail::LockGuard guard(*submit_mtx);
+  detail::LockGuard guard(submit_mtx);
   return submit_impl(data, n_dwords);
 }
 
@@ -676,7 +674,7 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
   else if (!private_segment_size)
     private_segment_size = /*8 KiB=*/8 * 1024;
 
-  detail::LockGuard guard(*base.submit_mtx);
+  detail::LockGuard guard(base.submit_mtx);
 
   auto *sctx = base.scratch_watch_ctx.get();
   if (__atomic_load_n(&sctx->error, __ATOMIC_RELAXED))

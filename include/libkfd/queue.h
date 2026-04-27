@@ -89,8 +89,7 @@ private:
   QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
             Buffer control, Buffer ring, Buffer eop, detail::MappedRegion cwsr,
             Buffer cwsr_bo, volatile uint64_t *doorbell,
-            detail::Box<Event> err_event,
-            detail::Box<detail::Mutex> submit_mtx);
+            detail::Box<Event> err_event, detail::Mutex submit_mtx);
 
   std::expected<void, Error> submit(const uint32_t *data, size_t dwords);
   std::expected<void, Error> submit_impl(const uint32_t *data, size_t dwords);
@@ -118,7 +117,7 @@ private:
   detail::Box<QueueErrorCtx> err_watch_ctx;
   detail::Box<Event> scratch_event;
   detail::Box<ScratchCtx> scratch_watch_ctx;
-  detail::Box<detail::Mutex> submit_mtx;
+  detail::Mutex submit_mtx;
 
   uint64_t pending_wptr = 0;
 };

@@ -23,7 +23,7 @@ PoolAllocator::create(std::span<std::byte> region, size_t alignment) {
 
   SmallVector<Block, 8> blocks;
   KFD_CHECK(blocks.push_back({.offset = 0, .size = region.size()}));
-  auto mtx = KFD_TRY(Box<Mutex>::create());
+  Mutex mtx;
   return PoolAllocator(region, alignment, std::move(blocks), std::move(mtx));
 }
 
@@ -33,7 +33,7 @@ std::expected<void *, Error> PoolAllocator::allocate(size_t size) {
 
   size_t rounded = (size + align - 1) & ~(align - 1);
 
-  LockGuard lock(*mutex);
+  LockGuard lock(mutex);
 
   for (size_t i = 0; i < free_list.size(); ++i) {
     Block &blk = free_list[i];
@@ -71,7 +71,7 @@ std::expected<void, Error> PoolAllocator::deallocate(void *ptr, size_t size) {
   size_t offset = static_cast<size_t>(p - base);
   size_t rounded = (size + align - 1) & ~(align - 1);
 
-  LockGuard lock(*mutex);
+  LockGuard lock(mutex);
 
   // Find insertion point to keep the list sorted by offset.
   size_t pos = 0;

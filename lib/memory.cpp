@@ -56,7 +56,7 @@ using namespace kfd::detail;
 namespace kfd {
 
 Buffer::Buffer(uint64_t h, size_t sz, MappedRegion mapping,
-               SmallVector<uint32_t, 2> mapped_ids, Device *dev, Box<Mutex> mtx)
+               SmallVector<uint32_t, 2> mapped_ids, Device *dev, Mutex mtx)
     : len(sz), handle(h), mapping(std::move(mapping)), mtx(std::move(mtx)),
       mapped_ids(std::move(mapped_ids)), dev(dev) {}
 
@@ -64,7 +64,7 @@ void Buffer::destroy() {
   if (handle == 0)
     return;
   Context &ctx = dev->context();
-  LockGuard guard(*mtx);
+  LockGuard guard(mtx);
   if (!mapped_ids.empty()) {
     ioctl::kfd::unmap_memory_from_gpu_args args{
         .handle = handle,
@@ -145,9 +145,7 @@ std::expected<Buffer, Error> Buffer::allocate(Device &dev, size_t size,
     return kfd::unexpected(rebound.error());
   }
 
-  auto mtx = KFD_TRY(Box<Mutex>::create());
-  return Buffer(alloc_args.handle, size, std::move(*rebound), {}, &dev,
-                std::move(mtx));
+  return Buffer(alloc_args.handle, size, std::move(*rebound), {}, &dev, {});
 }
 
 std::expected<Buffer, Error> Buffer::pin(Device &dev, const void *ptr,
@@ -176,9 +174,7 @@ Buffer::pin_region(Device &dev, MappedRegion region, MemFlags flags) {
   KFD_CHECK(
       ioctl::call<ioctl::kfd::ALLOC_MEMORY_OF_GPU>(ctx.kfd_fd(), alloc_args));
 
-  auto mtx = KFD_TRY(Box<Mutex>::create());
-  return Buffer(alloc_args.handle, size, std::move(region), {}, &dev,
-                std::move(mtx));
+  return Buffer(alloc_args.handle, size, std::move(region), {}, &dev, {});
 }
 
 std::expected<void, Error> Buffer::map(std::span<Device *const> targets) {
@@ -191,7 +187,7 @@ std::expected<void, Error> Buffer::map(std::span<Device *const> targets) {
   for (auto *d : targets)
     KFD_CHECK(ids.push_back(d->gpu_id()));
 
-  LockGuard guard(*mtx);
+  LockGuard guard(mtx);
   KFD_CHECK(mapped_ids.reserve(mapped_ids.size() + ids.size()));
 
   ioctl::kfd::map_memory_to_gpu_args args{
@@ -232,7 +228,7 @@ std::expected<void, Error> Buffer::unmap(std::span<Device *const> targets) {
   for (auto *d : targets)
     KFD_CHECK(ids.push_back(d->gpu_id()));
 
-  LockGuard guard(*mtx);
+  LockGuard guard(mtx);
 
   ioctl::kfd::unmap_memory_from_gpu_args args{
       .handle = handle,

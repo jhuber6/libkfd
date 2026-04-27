@@ -9,7 +9,6 @@ target_sources(kfd PRIVATE
   topology.cpp
   trap_handler.c
 
-  detail/mutex.cpp
   detail/scratch.cpp
   detail/elf.cpp
   detail/mapped_region.cpp

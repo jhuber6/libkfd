@@ -1,7 +1,8 @@
-//===-- libkfd/detail/mutex.h - Futex-based mutex ---------------*- C++ -*-===//
+//===-- libkfd/detail/mutex.h - Spinlock mutex ------------------*- C++ -*-===//
 //
-// Lightweight non-recursive mutex built on Linux futex(2) and compiler atomic
-// builtins. No pthread dependency. Based on Ulrich Drepper's futex method.
+// Lightweight non-recursive mutex built on a test-and-test-and-set (TTAS) spin
+// loop. Contention in this library is short-lived, so a simple mutex is
+// sufficient for our purposes.
 //
 //===----------------------------------------------------------------------===//
 
@@ -11,6 +12,7 @@
 #include "libkfd/detail/utility.h"
 
 #include <cstdint>
+#include <utility>
 
 namespace kfd::detail {
 
@@ -20,30 +22,38 @@ public:
 
   Mutex(const Mutex &) = delete;
   Mutex &operator=(const Mutex &) = delete;
-  Mutex(Mutex &&) = delete;
-  Mutex &operator=(Mutex &&) = delete;
+
+  Mutex(Mutex &&other)
+      : state(__atomic_load_n(&other.state, __ATOMIC_RELAXED)) {
+    other.state = UNLOCKED;
+  }
+
+  Mutex &operator=(Mutex &&other) {
+    if (this != &other) {
+      state = __atomic_load_n(&other.state, __ATOMIC_RELAXED);
+      other.state = UNLOCKED;
+    }
+    return *this;
+  }
 
   void lock() {
-    uint32_t expected = UNLOCKED;
-    if (__atomic_compare_exchange_n(&state, &expected, LOCKED, false,
-                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
-      return;
-
-    lock_contended(expected);
+    if (__builtin_expect(__atomic_exchange_n(&state, LOCKED, __ATOMIC_ACQUIRE),
+                         0))
+      lock_slow();
   }
 
-  void unlock() {
-    if (__atomic_exchange_n(&state, UNLOCKED, __ATOMIC_RELEASE) == CONTENDED)
-      unlock_contended();
-  }
+  void unlock() { __atomic_store_n(&state, UNLOCKED, __ATOMIC_RELEASE); }
 
 private:
   static constexpr uint32_t UNLOCKED = 0;
   static constexpr uint32_t LOCKED = 1;
-  static constexpr uint32_t CONTENDED = 2;
 
-  [[gnu::cold]] void lock_contended(uint32_t expected);
-  [[gnu::cold]] void unlock_contended();
+  [[gnu::noinline]] void lock_slow() {
+    do {
+      while (__atomic_load_n(&state, __ATOMIC_RELAXED))
+        spin_hint();
+    } while (__atomic_exchange_n(&state, LOCKED, __ATOMIC_ACQUIRE));
+  }
 
   uint32_t state = UNLOCKED;
 };

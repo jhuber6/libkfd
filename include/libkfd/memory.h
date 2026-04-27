@@ -9,7 +9,6 @@
 #ifndef LIBKFD_MEMORY_H
 #define LIBKFD_MEMORY_H
 
-#include "libkfd/detail/box.h"
 #include "libkfd/detail/mapped_region.h"
 #include "libkfd/detail/mutex.h"
 #include "libkfd/detail/small_vector.h"
@@ -125,7 +124,7 @@ private:
 
   Buffer(uint64_t h, size_t sz, detail::MappedRegion mapping,
          detail::SmallVector<uint32_t, 2> mapped_ids, Device *dev,
-         detail::Box<detail::Mutex> mtx);
+         detail::Mutex mtx);
 
   void destroy();
   void release_device();
@@ -133,7 +132,7 @@ private:
   size_t len = 0;
   uint64_t handle = 0;
   detail::MappedRegion mapping;
-  detail::Box<detail::Mutex> mtx;
+  detail::Mutex mtx;
   detail::SmallVector<uint32_t, 2> mapped_ids;
   Device *dev = nullptr;
 };
