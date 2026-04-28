@@ -783,12 +783,16 @@ CooperativeQueue::create(Device &dev, size_t ring_size, uint32_t target_xcc) {
 }
 
 // SDMA queues execute packets in-order to copy between PCI-e or XGMI.
-std::expected<SDMAQueue, Error> SDMAQueue::create(Device &dev, QueueType type,
+std::expected<SDMAQueue, Error> SDMAQueue::create(Device &dev,
                                                   size_t ring_size) {
-  if (type == QueueType::COMPUTE)
-    return kfd::unexpected(EINVAL, "COMPUTE queue passed to SDMA queue");
-  auto base = KFD_TRY(QueueBase::create(dev, type, ring_size));
-  return SDMAQueue(std::move(base), type);
+  auto base = KFD_TRY(QueueBase::create(dev, QueueType::SDMA, ring_size));
+  return SDMAQueue(std::move(base));
+}
+
+std::expected<XGMIQueue, Error> XGMIQueue::create(Device &dev,
+                                                  size_t ring_size) {
+  auto base = KFD_TRY(QueueBase::create(dev, QueueType::SDMA_XGMI, ring_size));
+  return XGMIQueue(std::move(base));
 }
 
 } // namespace kfd

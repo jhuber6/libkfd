@@ -57,6 +57,7 @@ public:
 private:
   friend class ComputeQueue;
   friend class SDMAQueue;
+  friend class XGMIQueue;
 
   // Shared memory written by the kernel/hardware and read by userspace.
   //
@@ -122,6 +123,8 @@ private:
   uint64_t pending_wptr = 0;
 };
 
+// High level interface into a PM4 queue used to dispatch kernels and
+// communicate with the device.
 class ComputeQueue {
 public:
   static std::expected<ComputeQueue, Error>
@@ -304,18 +307,13 @@ private:
   bool cooperative = false;
 };
 
+// A compute queue that is exclusively scheduled (non-preemptible). Dispatches
+// must fit in the device's resource limits.
 class CooperativeQueue : public ComputeQueue {
 public:
   static std::expected<CooperativeQueue, Error>
   create(Device &dev, size_t ring_size = 4ul * detail::page_size(),
          uint32_t target_xcc = 0);
-
-  ~CooperativeQueue() = default;
-
-  CooperativeQueue(const CooperativeQueue &) = delete;
-  CooperativeQueue &operator=(const CooperativeQueue &) = delete;
-  CooperativeQueue(CooperativeQueue &&) = default;
-  CooperativeQueue &operator=(CooperativeQueue &&) = default;
 
 private:
   explicit CooperativeQueue(ComputeQueue &&cq) : ComputeQueue(std::move(cq)) {
@@ -323,11 +321,11 @@ private:
   }
 };
 
+// A queue used to copy memory between pinned CPU memory and VRAM.
 class SDMAQueue {
 public:
   static std::expected<SDMAQueue, Error>
-  create(Device &dev, QueueType type = QueueType::SDMA,
-         size_t ring_size = detail::page_size());
+  create(Device &dev, size_t ring_size = detail::page_size());
 
   ~SDMAQueue() = default;
 
@@ -422,17 +420,25 @@ public:
     return base.submit(buf, sdma::POLL_REGMEM_DWORDS);
   }
 
-  bool is_xgmi() const { return type == QueueType::SDMA_XGMI; }
-
   uint32_t queue_id() const { return base.queue_id(); }
   size_t ring_dwords() const { return base.ring_dwords(); }
   explicit operator bool() const { return static_cast<bool>(base); }
 
 private:
-  explicit SDMAQueue(QueueBase &&b, QueueType type)
-      : base(std::move(b)), type(type) {}
+  friend class XGMIQueue;
+
+  explicit SDMAQueue(QueueBase &&b) : base(std::move(b)) {}
   QueueBase base;
-  QueueType type;
+};
+
+// An SDMA queue used to copy between two XGMI devices instead of PCI(e).
+class XGMIQueue : public SDMAQueue {
+public:
+  static std::expected<XGMIQueue, Error>
+  create(Device &dev, size_t ring_size = detail::page_size());
+
+private:
+  explicit XGMIQueue(QueueBase &&b) : SDMAQueue(std::move(b)) {}
 };
 
 } // namespace kfd
