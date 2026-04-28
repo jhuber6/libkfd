@@ -316,7 +316,6 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
     auto raw_ev = KFD_TRY(Event::create(ctx));
     err_ev = KFD_TRY(detail::Box<Event>::create(std::move(raw_ev)));
 
-    void *cwsr_data = nullptr;
     bool svm_supported =
         (props.capability & NodeProperties::NODE_CAP_SVMAPI_SUPPORTED) != 0;
 
@@ -325,6 +324,16 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
     // anonymous pages as a USERPTR BO (matching libhsakmt's dGPU fallback).
     auto cwsr_region = KFD_TRY(MappedRegion::create(total_cwsr));
     std::memset(cwsr_region.data(), 0, cwsr_region.size());
+    for (uint32_t i = 0; i < num_xcc; ++i) {
+      auto *hdr = reinterpret_cast<abi::CwsrHeader *>(
+          static_cast<char *>(cwsr_region.data()) +
+          static_cast<size_t>(i * props.cwsr_size));
+      hdr->debug_offset = (num_xcc - i) * props.cwsr_size;
+      hdr->debug_size = debug_mem * num_xcc;
+      hdr->err_payload_addr = reinterpret_cast<uint64_t>(&ctl->err_payload);
+      hdr->err_event_id = err_ev->event_id();
+    }
+
     if (svm_supported) {
       constexpr SVMFlags CWSR_SVM_FLAGS = SVMFlags::HOST_ACCESS |
                                           SVMFlags::GPU_EXEC |
@@ -345,26 +354,9 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
       KFD_CHECK(bo.map(dev));
       cwsr_bo_buf = std::move(bo);
     }
-    cwsr_data = cwsr_bo_buf ? cwsr_bo_buf.data() : cwsr_region.data();
     if (cwsr_region)
       cwsr_buf = std::move(cwsr_region);
-
-    for (uint32_t i = 0; i < num_xcc; ++i) {
-      auto *hdr = reinterpret_cast<abi::CwsrHeader *>(
-          static_cast<char *>(cwsr_data) +
-          static_cast<size_t>(i * props.cwsr_size));
-      hdr->debug_offset = (num_xcc - i) * props.cwsr_size;
-      hdr->debug_size = debug_mem * num_xcc;
-      hdr->err_payload_addr = reinterpret_cast<uint64_t>(&ctl->err_payload);
-      hdr->err_event_id = err_ev->event_id();
-    }
   }
-
-  // The ring buffer itself that holds the packets.
-  auto ring_buf =
-      KFD_TRY(Buffer::allocate(dev, ring_size, MemType::GTT, QUEUE_GTT_FLAGS));
-  KFD_CHECK(ring_buf.map(dev));
-  std::memset(ring_buf.data(), 0, ring_buf.size());
 
   // An internal end-of-pipe buffer used by the CP to manage EOP events.
   Buffer eop_buf;
@@ -374,6 +366,12 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
         MemFlags::WRITABLE | MemFlags::EXECUTABLE | MemFlags::NO_SUBSTITUTE));
     KFD_CHECK(eop_buf.map(dev));
   }
+
+  // The ring buffer itself that holds the packets.
+  auto ring_buf =
+      KFD_TRY(Buffer::allocate(dev, ring_size, MemType::GTT, QUEUE_GTT_FLAGS));
+  KFD_CHECK(ring_buf.map(dev));
+  std::memset(ring_buf.data(), 0, ring_buf.size());
 
   // Ensure all the queue memory is committed before submitting it.
   memory_barrier();
@@ -628,15 +626,15 @@ std::expected<void, Error> QueueBase::submit_impl(const uint32_t *data,
 // completion.
 std::expected<ComputeQueue, Error>
 ComputeQueue::create(Device &dev, size_t ring_size, uint32_t target_xcc) {
-  auto base = KFD_TRY(
-      QueueBase::create(dev, QueueType::COMPUTE, ring_size, target_xcc));
-
-  // Used to signal the completion of end-of-pipe packets to the queue. The CP
-  // will poll this value repeatedly for the finished value so it lives in VRAM.
+  // Allocate before the queue is live so the VRAM alloc + map cannot trigger
+  // a process eviction while the CP is already fetching from the ring.
   auto eop_vram = KFD_TRY(Buffer::allocate(
       dev, sizeof(uint64_t), MemType::VRAM,
       MemFlags::WRITABLE | MemFlags::NO_SUBSTITUTE | MemFlags::UNCACHED));
   KFD_CHECK(eop_vram.map(dev));
+
+  auto base = KFD_TRY(
+      QueueBase::create(dev, QueueType::COMPUTE, ring_size, target_xcc));
 
   ComputeQueue q(std::move(base), std::move(eop_vram));
 

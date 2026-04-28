@@ -77,9 +77,9 @@ Executable::load(Device &dev, std::span<const std::byte> image,
                       static_cast<unsigned long>(footprint));
 
   // Allocate GPU VRAM memory for the loaded image to reside in.
-  auto img = KFD_TRY(
-      Buffer::allocate(dev, static_cast<size_t>(footprint), MemType::VRAM,
-                       MemFlags::WRITABLE | MemFlags::EXECUTABLE));
+  auto img = KFD_TRY(Buffer::allocate(
+      dev, static_cast<size_t>(footprint), MemType::VRAM,
+      MemFlags::WRITABLE | MemFlags::EXECUTABLE | MemFlags::NO_SUBSTITUTE));
   KFD_CHECK(img.map(dev));
 
   // Anonymous pages are zero-filled by the kernel, so BSS tails and
