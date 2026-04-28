@@ -20,12 +20,13 @@ uint32_t scratch_num_se(const Device &dev) {
 }
 
 uint32_t compute_tmpring_size(const Device &dev, uint32_t per_thread,
-                              size_t region_size, uint32_t num_xcc) {
+                              uint32_t num_lanes, size_t region_size,
+                              uint32_t num_xcc) {
   if (per_thread == 0 || region_size == 0)
     return 0;
 
   const auto &props = dev.properties();
-  size_t per_wave = static_cast<size_t>(SCRATCH_LANES_PER_WAVE) * per_thread;
+  size_t per_wave = static_cast<size_t>(num_lanes) * per_thread;
 
   uint32_t align = scratch_alignment_unit(dev.gfx_version());
   per_wave = align_up(per_wave, static_cast<size_t>(align));
@@ -97,12 +98,12 @@ uint32_t scratch_device_slots(const Device &dev, uint32_t num_xcc) {
 }
 
 size_t scratch_alloc_size(uint32_t gfx_version, uint32_t per_thread,
-                          uint32_t slots) {
+                          uint32_t num_lanes, uint32_t slots) {
   if (per_thread == 0 || slots == 0)
     return 0;
 
   size_t per_wave =
-      align_up(static_cast<size_t>(SCRATCH_LANES_PER_WAVE) * per_thread,
+      align_up(static_cast<size_t>(num_lanes) * per_thread,
                static_cast<size_t>(scratch_alignment_unit(gfx_version)));
 
   size_t needed = per_wave * slots;

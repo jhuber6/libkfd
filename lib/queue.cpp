@@ -39,6 +39,7 @@ struct QueueErrorCtx {
 
 struct ScratchRequest {
   uint32_t needed_per_thread;
+  uint32_t needed_lanes;
   Dim3 block;
   uint16_t kernel_code_properties;
 };
@@ -55,6 +56,7 @@ struct ScratchCtx {
   Buffer scratch_bo;
   uint32_t scratch_tmpring = 0;
   uint32_t scratch_per_thread = 0;
+  uint32_t scratch_lanes = 0;
 
   detail::Mutex mtx;
   detail::SmallVector<ScratchRequest, 8> requests;
@@ -153,9 +155,12 @@ void QueueBase::scratch_handler(Event &, void *user_data) {
     sctx->requests.pop_front();
   }
 
-  // Reallocate if the request exceeds the current scratch size.
-  if (req.needed_per_thread >
-      __atomic_load_n(&sctx->scratch_per_thread, __ATOMIC_RELAXED)) {
+  // Reallocate if the request exceeds the current scratch geometry.
+  uint32_t cur_per_thread =
+      __atomic_load_n(&sctx->scratch_per_thread, __ATOMIC_RELAXED);
+  uint32_t cur_lanes = __atomic_load_n(&sctx->scratch_lanes, __ATOMIC_RELAXED);
+
+  if (req.needed_per_thread > cur_per_thread || req.needed_lanes > cur_lanes) {
     void *old_va = __atomic_load_n(&sctx->scratch_va, __ATOMIC_RELAXED);
     if (old_va) {
       sctx->scratch_bo.release_device();
@@ -166,23 +171,23 @@ void QueueBase::scratch_handler(Event &, void *user_data) {
       sctx->scratch_size = 0;
       __atomic_store_n(&sctx->scratch_tmpring, 0u, __ATOMIC_RELAXED);
       __atomic_store_n(&sctx->scratch_per_thread, 0u, __ATOMIC_RELAXED);
+      __atomic_store_n(&sctx->scratch_lanes, 0u, __ATOMIC_RELAXED);
     }
 
-    // Fetch the number of slots that will be allocating the per-thread scratch.
     uint32_t gfx = sctx->dev->gfx_version();
     Dim3 block = req.block;
+    uint32_t lanes = req.needed_lanes;
     uint32_t slots = detail::scratch_device_slots(*sctx->dev, 1);
     uint32_t dev_num_xcc =
         sctx->dev->properties().num_xcc ? sctx->dev->properties().num_xcc : 1;
     uint32_t num_se = detail::scratch_num_se(*sctx->dev) / dev_num_xcc;
     if (num_se == 0)
       num_se = 1;
-    uint32_t waves_per_group =
-        detail::max(static_cast<uint32_t>(
-                        (static_cast<uint64_t>(block.x) * block.y * block.z +
-                         detail::SCRATCH_LANES_PER_WAVE - 1) /
-                        detail::SCRATCH_LANES_PER_WAVE),
-                    1u);
+    uint32_t waves_per_group = detail::max(
+        static_cast<uint32_t>(
+            (static_cast<uint64_t>(block.x) * block.y * block.z + lanes - 1) /
+            lanes),
+        1u);
     uint32_t min_slots = 2 * num_se;
     bool allocated = false;
 
@@ -190,7 +195,7 @@ void QueueBase::scratch_handler(Event &, void *user_data) {
     // there is insufficient storage we resize the slots and try again.
     while (slots >= min_slots) {
       size_t alloc_size =
-          detail::scratch_alloc_size(gfx, req.needed_per_thread, slots);
+          detail::scratch_alloc_size(gfx, req.needed_per_thread, lanes, slots);
       if (alloc_size == 0)
         break;
 
@@ -224,11 +229,13 @@ void QueueBase::scratch_handler(Event &, void *user_data) {
       __atomic_store_n(&sctx->scratch_va, *region, __ATOMIC_RELAXED);
       sctx->scratch_size = alloc_size;
       __atomic_store_n(&sctx->scratch_tmpring,
-                       detail::compute_tmpring_size(
-                           *sctx->dev, req.needed_per_thread, alloc_size, 1),
+                       detail::compute_tmpring_size(*sctx->dev,
+                                                    req.needed_per_thread,
+                                                    lanes, alloc_size, 1),
                        __ATOMIC_RELAXED);
       __atomic_store_n(&sctx->scratch_per_thread, req.needed_per_thread,
                        __ATOMIC_RELAXED);
+      __atomic_store_n(&sctx->scratch_lanes, lanes, __ATOMIC_RELAXED);
       sctx->scratch_bo = std::move(*bo);
       allocated = true;
       break;
@@ -678,24 +685,34 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
   if (__atomic_load_n(&sctx->error, __ATOMIC_RELAXED))
     return kfd::unexpected(sctx->error, "scratch allocation failed");
 
+  uint32_t kernel_lanes =
+      (kd.kernel_code_properties & abi::ENABLE_WAVEFRONT_SIZE32) ? 32 : 64;
+
   bool needs_resize = false;
   uint32_t current_seq = sctx->seq;
 
   // This launch requires more scratch than we currently have allocated. We will
   // need to push a request and stall the CP until the previous work has
   // completed and the new scratch region is allocated by the watcher thread.
-  if (private_segment_size >
-      __atomic_load_n(&sctx->scratch_per_thread, __ATOMIC_RELAXED)) {
+  // The SPI handles wave32 and wave64 scratch differently so changing the lane
+  // size also triggers a full stall and reallocation.
+  uint32_t cur_per_thread =
+      __atomic_load_n(&sctx->scratch_per_thread, __ATOMIC_RELAXED);
+  uint32_t cur_lanes = __atomic_load_n(&sctx->scratch_lanes, __ATOMIC_RELAXED);
+  if (private_segment_size > 0 &&
+      (private_segment_size > cur_per_thread || kernel_lanes > cur_lanes)) {
+    uint32_t needed_lanes = detail::max(kernel_lanes, cur_lanes);
+    uint32_t needed_per_thread =
+        detail::max(private_segment_size, cur_per_thread);
     size_t per_wave = detail::align_up(
-        size_t(detail::SCRATCH_LANES_PER_WAVE) * private_segment_size,
+        size_t(needed_lanes) * needed_per_thread,
         size_t(detail::scratch_alignment_unit(base.dev->gfx_version())));
     if (per_wave > detail::max_wave_scratch(base.dev->gfx_version()))
       return kfd::unexpected(
           ERANGE, "scratch %u B exceeds hardware per-wave limit (%u B / wave)",
-          private_segment_size,
-          detail::max_wave_scratch(base.dev->gfx_version()));
+          needed_per_thread, detail::max_wave_scratch(base.dev->gfx_version()));
 
-    ScratchRequest req{private_segment_size, cfg.block,
+    ScratchRequest req{needed_per_thread, needed_lanes, cfg.block,
                        kd.kernel_code_properties};
 
     detail::LockGuard request_guard(sctx->mtx);

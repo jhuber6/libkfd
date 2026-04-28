@@ -19,10 +19,6 @@ class Device;
 
 namespace kfd::detail {
 
-// Pessimistic lane count for scratch sizing. Wave32 kernels on RDNA still
-// allocate 64-lane slots.
-inline constexpr uint32_t SCRATCH_LANES_PER_WAVE = 64;
-
 // COMPUTE_TMPRING_SIZE.WAVESIZE granularity, 1024B pre-GFX11, 256B GFX11+.
 // Reference: LLVM SIDefines.h S_00B860_WAVESIZE_*;
 inline uint32_t scratch_alignment_unit(uint32_t gfx_version) {
@@ -69,14 +65,15 @@ uint32_t scratch_num_se(const Device &dev);
 //     N = 24 (GFX9-10, 13 bits), 26 (GFX11, 15 bits), 29 (GFX12, 18 bits)
 //     alignment_unit: 1024B (GFX9-10), 256B (GFX11+)
 uint32_t compute_tmpring_size(const Device &dev, uint32_t per_thread,
-                              size_t region_size, uint32_t num_xcc = 0);
+                              uint32_t num_lanes, size_t region_size,
+                              uint32_t num_xcc = 0);
 
 // Maximum device scratch slot count (CUs * MaxSlotsScratchCU, SE-aligned).
 uint32_t scratch_device_slots(const Device &dev, uint32_t num_xcc = 0);
 
 // Backing allocation size for the given per-thread need and wave slot count.
 size_t scratch_alloc_size(uint32_t gfx_version, uint32_t per_thread,
-                          uint32_t slots);
+                          uint32_t num_lanes, uint32_t slots);
 
 } // namespace kfd::detail
 
