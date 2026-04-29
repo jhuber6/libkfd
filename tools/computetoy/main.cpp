@@ -96,8 +96,8 @@ int main(int argc, char **argv) {
 
   auto ctx = KFD_EXPECT(kfd::Context::create());
   auto &dev = *KFD_EXPECT(find_device(ctx, file));
-  std::printf("GPU: %.*s (gfx%u)\n", static_cast<int>(dev.get_name().size()),
-              dev.get_name().data(), dev.properties().gfx_target_version);
+  std::printf("GPU: %.*s (gfx%u)\n", static_cast<int>(dev.name().size()),
+              dev.name().data(), dev.properties().gfx_target_version);
 
   auto compute = KFD_EXPECT(kfd::ComputeQueue::create(dev));
 

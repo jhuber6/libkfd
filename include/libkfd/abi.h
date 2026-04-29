@@ -55,7 +55,7 @@ constexpr bool needs_cwsr_priv_wa(uint32_t gfx) {
 }
 
 // Required alignment for the private scratch region.
-constexpr size_t PRIVATE_SEGMENT_ALIGN = 0x10000;
+inline constexpr size_t PRIVATE_SEGMENT_ALIGN = 0x10000;
 
 // Kernel code properties bitfield masks.
 //

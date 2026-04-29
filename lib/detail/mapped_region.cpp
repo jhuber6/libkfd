@@ -1,4 +1,4 @@
-//===-- lib/mapped_region.cpp - mmap/munmap RAII wrapper --------*- C++ -*-===//
+//===-- lib/detail/mapped_region.cpp - mmap/munmap RAII wrapper -*- C++ -*-===//
 //
 // Simple RAII wrappers around Linux pages.
 //
@@ -13,20 +13,22 @@
 
 namespace kfd::detail {
 
-static std::expected<void, Error> checked_munmap(void *addr, size_t len) {
+namespace {
+
+std::expected<void, Error> checked_munmap(void *addr, size_t len) {
   if (::munmap(addr, len) != 0)
     return kfd::unexpected(errno, "munmap failed: %p, %zu", addr, len);
   return {};
 }
 
+} // namespace
+
 std::expected<MappedRegion, Error> MappedRegion::create(size_t length, int prot,
                                                         int flags) {
   void *addr = ::mmap(nullptr, length, prot, flags, -1, 0);
-  if (addr == MAP_FAILED) {
-    int err = errno;
-    return kfd::unexpected(err, "mmap anon %zu bytes (prot=0x%x flags=0x%x)",
+  if (addr == MAP_FAILED)
+    return kfd::unexpected(errno, "mmap anon %zu bytes (prot=0x%x flags=0x%x)",
                            length, prot, flags);
-  }
   return MappedRegion(addr, length);
 }
 
@@ -36,11 +38,9 @@ std::expected<MappedRegion, Error> MappedRegion::reserve(size_t length,
   if (addr)
     flags |= MAP_FIXED;
   void *a = ::mmap(addr, length, PROT_NONE, flags, -1, 0);
-  if (a == MAP_FAILED) {
-    int err = errno;
-    return kfd::unexpected(err, "mmap reserve %zu bytes at %p failed", length,
+  if (a == MAP_FAILED)
+    return kfd::unexpected(errno, "mmap reserve %zu bytes at %p failed", length,
                            addr);
-  }
   return MappedRegion(a, length);
 }
 
@@ -62,9 +62,9 @@ MappedRegion::reserve_aligned(size_t length, size_t alignment) {
   region->release();
 
   if (prefix)
-    KFD_ASSERT(checked_munmap(reinterpret_cast<void *>(raw), prefix));
+    KFD_CHECK(checked_munmap(reinterpret_cast<void *>(raw), prefix));
   if (suffix)
-    KFD_ASSERT(
+    KFD_CHECK(
         checked_munmap(reinterpret_cast<void *>(aligned + length), suffix));
 
   return MappedRegion(reinterpret_cast<void *>(aligned), length);
@@ -73,11 +73,9 @@ MappedRegion::reserve_aligned(size_t length, size_t alignment) {
 std::expected<MappedRegion, Error> MappedRegion::rebind(int fd, int prot,
                                                         off_t offset) {
   void *result = ::mmap(addr, len, prot, MAP_SHARED | MAP_FIXED, fd, offset);
-  if (result == MAP_FAILED) {
-    int err = errno;
-    return kfd::unexpected(err, "mmap fixed %zu bytes fd=%d off=%ld failed",
+  if (result == MAP_FAILED)
+    return kfd::unexpected(errno, "mmap fixed %zu bytes fd=%d off=%ld failed",
                            len, fd, offset);
-  }
   size_t sz = len;
   addr = nullptr;
   len = 0;

@@ -57,12 +57,12 @@ enum class MemFlags : uint32_t {
   EXT_COHERENT = /*KFD_IOC_ALLOC_MEM_FLAGS_EXT_COHERENT=*/0x1000000,
 };
 
-constexpr MemFlags operator|(MemFlags a, MemFlags b) {
+inline constexpr MemFlags operator|(MemFlags a, MemFlags b) {
   return static_cast<MemFlags>(static_cast<uint32_t>(a) |
                                static_cast<uint32_t>(b));
 }
 
-constexpr MemFlags operator&(MemFlags a, MemFlags b) {
+inline constexpr MemFlags operator&(MemFlags a, MemFlags b) {
   return static_cast<MemFlags>(static_cast<uint32_t>(a) &
                                static_cast<uint32_t>(b));
 }
@@ -192,17 +192,17 @@ enum class SVMFlags : uint32_t {
   EXT_COHERENT = /*KFD_IOCTL_SVM_FLAG_EXT_COHERENT=*/0x00000080,
 };
 
-constexpr SVMFlags operator|(SVMFlags a, SVMFlags b) {
+inline constexpr SVMFlags operator|(SVMFlags a, SVMFlags b) {
   return static_cast<SVMFlags>(static_cast<uint32_t>(a) |
                                static_cast<uint32_t>(b));
 }
 
-constexpr SVMFlags operator&(SVMFlags a, SVMFlags b) {
+inline constexpr SVMFlags operator&(SVMFlags a, SVMFlags b) {
   return static_cast<SVMFlags>(static_cast<uint32_t>(a) &
                                static_cast<uint32_t>(b));
 }
 
-constexpr SVMFlags operator~(SVMFlags a) {
+inline constexpr SVMFlags operator~(SVMFlags a) {
   return static_cast<SVMFlags>(~static_cast<uint32_t>(a));
 }
 

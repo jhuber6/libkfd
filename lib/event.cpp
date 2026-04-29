@@ -188,7 +188,7 @@ std::expected<size_t, Error> wait_any(std::span<Event *> events,
         eds[i].hw_exception_data.gpu_id)
       return i;
   }
-  return 0;
+  return kfd::unexpected(EIO, "wait_any completed but no event was signaled");
 }
 
 } // namespace kfd

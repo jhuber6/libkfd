@@ -18,30 +18,11 @@
 
 namespace kfd::pm4 {
 
-// PM4 type-3 packet header (GCN / RDNA).
-//
-// Header layout (32 bits):
-//   [0]     predicate   - skip packet when the CP predicate register is clear
-//   [1]     shaderType  - 0 = graphics, 1 = compute
-//   [7:2]   reserved
-//   [15:8]  opcode      - IT_* opcode (see Opcode enum below)
-//   [29:16] count       - number of body dwords minus one (14-bit field,
-//                          max 0x3FFF, so a packet can span up to 16385 dwords)
-//   [31:30] type        - 3 for type-3 packets
-//
-// Total packet size = count + 2 dwords (1 header + (count + 1) body dwords).
-//
-// References: PACKET3_COMPUTE in amdgpu/soc15d.h
-inline constexpr uint32_t header(uint8_t opcode, uint16_t count) {
-  return uint32_t(1) << 1 | static_cast<uint32_t>(opcode) << 8 |
-         static_cast<uint32_t>(count) << 16 | uint32_t(3) << 30;
-}
-
 // IT_* opcodes consumed by the MEC (Micro Engine Compute) command processor.
 //
 // References: amdkfd/kfd_pm4_opcodes.h;
 //             amdgpu/soc15d.h
-enum Opcode : uint8_t {
+enum class Opcode : uint8_t {
   NOP = 0x10,
   DISPATCH_DIRECT = 0x15,
   ATOMIC_MEM = 0x1E,
@@ -54,6 +35,25 @@ enum Opcode : uint8_t {
   COPY_DATA = 0x40,
   SET_SH_REG = 0x76,
 };
+
+// PM4 type-3 packet header (GCN / RDNA).
+//
+// Header layout (32 bits):
+//   [0]     predicate   - skip packet when the CP predicate register is clear
+//   [1]     shaderType  - 0 = graphics, 1 = compute
+//   [7:2]   reserved
+//   [15:8]  opcode      - IT_* opcode (see Opcode enum above)
+//   [29:16] count       - number of body dwords minus one (14-bit field,
+//                          max 0x3FFF, so a packet can span up to 16385 dwords)
+//   [31:30] type        - 3 for type-3 packets
+//
+// Total packet size = count + 2 dwords (1 header + (count + 1) body dwords).
+//
+// References: PACKET3_COMPUTE in amdgpu/soc15d.h
+inline constexpr uint32_t header(Opcode opcode, uint16_t count) {
+  return uint32_t(1) << 1 | static_cast<uint32_t>(opcode) << 8 |
+         static_cast<uint32_t>(count) << 16 | uint32_t(3) << 30;
+}
 
 // Compute SH register offsets and dispatch initiator bits.
 //
@@ -134,7 +134,7 @@ inline constexpr uint32_t DISPATCH_CS_W32_EN = 1u << 15;
 // NOP fill value for unused ring slots. count=0x3FFF makes the CP skip
 // the maximum number of body dwords, so if every slot is filled with this
 // value, the CP simply advances until it hits real packets at wptr.
-inline constexpr uint32_t CMD_NOP = header(NOP, 0x3FFF);
+inline constexpr uint32_t CMD_NOP = header(Opcode::NOP, 0x3FFF);
 
 // Write a properly-sized NOP packet spanning exactly `dwords` ring slots.
 // A single NOP header encodes the body count in its COUNT field.
@@ -145,7 +145,7 @@ inline void nop_fill(uint32_t *out, uint32_t dwords) {
     out[0] = CMD_NOP;
     return;
   }
-  out[0] = header(NOP, static_cast<uint16_t>(dwords - 2));
+  out[0] = header(Opcode::NOP, static_cast<uint16_t>(dwords - 2));
   for (uint32_t i = 1; i < dwords; ++i)
     out[i] = 0;
 }
@@ -232,7 +232,7 @@ inline uint32_t copy_data(uint32_t *out, CopyDataSrcSel src_sel,
                           bool wr_confirm = true,
                           CachePolicy src_policy = POLICY_LRU,
                           CachePolicy dst_policy = POLICY_LRU) {
-  out[0] = header(COPY_DATA, 4);
+  out[0] = header(Opcode::COPY_DATA, 4);
   out[1] = (static_cast<uint32_t>(src_sel) & 0xFu) |
            ((static_cast<uint32_t>(dst_sel) & 0xFu) << 8) |
            ((static_cast<uint32_t>(src_policy) & 0x3u) << 13) |
@@ -296,7 +296,7 @@ inline uint32_t write_data(uint32_t *out, void *addr, uint32_t value,
                            DstSel dst = DST_MEM_ASYNC,
                            CachePolicy policy = POLICY_NOA,
                            bool wr_confirm = true) {
-  out[0] = header(WRITE_DATA, 3);
+  out[0] = header(Opcode::WRITE_DATA, 3);
   out[1] = (static_cast<uint32_t>(dst) << 8) | (wr_confirm ? (1u << 20) : 0u) |
            (static_cast<uint32_t>(policy) << 25);
   out[2] = detail::lo(reinterpret_cast<uintptr_t>(addr));
@@ -378,7 +378,7 @@ inline constexpr uint32_t DMA_DATA_MAX_BYTES_GFX10 = 1u << 26; // 64 MiB
 inline uint32_t dma_data(uint32_t *out, uint32_t control, uint64_t src_addr,
                          uint64_t dst_addr, uint32_t byte_count,
                          uint32_t cmd_flags = 0) {
-  out[0] = header(DMA_DATA, 5);
+  out[0] = header(Opcode::DMA_DATA, 5);
   out[1] = control;
   out[2] = detail::lo(src_addr);
   out[3] = detail::hi(src_addr);
@@ -532,7 +532,7 @@ inline uint32_t eop_wb_flush(uint32_t gfx_version) {
 inline uint32_t release_mem(uint32_t *out, uint32_t ordinal2, DataSel data,
                             IntSel intr, void *addr = nullptr,
                             uint64_t value = 0, uint32_t int_ctxid = 0) {
-  out[0] = header(RELEASE_MEM, 6);
+  out[0] = header(Opcode::RELEASE_MEM, 6);
   out[1] = ordinal2;
   out[2] =
       (static_cast<uint32_t>(intr) << 24) | (static_cast<uint32_t>(data) << 29);
@@ -640,7 +640,7 @@ inline uint32_t acquire_mem(uint32_t *out, uint32_t gfx_target_version,
   for (uint32_t i = 0; i < dwords; ++i)
     out[i] = 0;
 
-  out[0] = header(ACQUIRE_MEM, static_cast<uint16_t>(dwords - 2));
+  out[0] = header(Opcode::ACQUIRE_MEM, static_cast<uint16_t>(dwords - 2));
 
   if (!gfx10_plus) {
     uint32_t cntl = 0;
@@ -705,7 +705,7 @@ inline constexpr uint32_t WAIT_REG_MEM_DWORDS = 7;
 inline uint32_t wait_reg_mem(uint32_t *out, uint32_t gfx_version, void *addr,
                              Condition cond, uint32_t value,
                              uint32_t mask = 0xFFFFFFFF, bool optimize = true) {
-  out[0] = header(WAIT_REG_MEM, 5);
+  out[0] = header(Opcode::WAIT_REG_MEM, 5);
   out[1] = static_cast<uint32_t>(cond) | (1u << 4); // mem_space = memory
   out[2] = detail::lo(reinterpret_cast<uintptr_t>(addr)) & ~0x3u;
   out[3] = detail::hi(reinterpret_cast<uintptr_t>(addr));
@@ -784,7 +784,7 @@ inline uint32_t atomic_mem(uint32_t *out, AtomicOp op, void *addr,
                            int64_t src_data, int64_t cmp_data = 0,
                            AtomicCommand cmd = ATOMIC_WAIT_CONFIRM,
                            CachePolicy policy = POLICY_LRU) {
-  out[0] = header(ATOMIC_MEM, 7);
+  out[0] = header(Opcode::ATOMIC_MEM, 7);
   out[1] = (static_cast<uint32_t>(op) & 0x7Fu) |
            (static_cast<uint32_t>(cmd) << 8) |
            (static_cast<uint32_t>(policy) << 25);
@@ -811,7 +811,7 @@ inline uint32_t atomic_mem(uint32_t *out, AtomicOp op, void *addr,
 inline uint32_t set_sh_reg(uint32_t *out, uint32_t reg_addr,
                            const uint32_t *values, uint32_t count) {
   uint32_t dwords = 2 + count;
-  out[0] = header(SET_SH_REG, static_cast<uint16_t>(dwords - 2));
+  out[0] = header(Opcode::SET_SH_REG, static_cast<uint16_t>(dwords - 2));
   out[1] = reg_addr - regs::SH_BASE;
   for (uint32_t i = 0; i < count; ++i)
     out[2 + i] = values[i];
@@ -841,7 +841,7 @@ inline constexpr uint32_t DISPATCH_DIRECT_DWORDS = 5;
 
 inline uint32_t dispatch_direct(uint32_t *out, uint32_t dim_x, uint32_t dim_y,
                                 uint32_t dim_z, uint32_t initiator) {
-  out[0] = header(DISPATCH_DIRECT, 3);
+  out[0] = header(Opcode::DISPATCH_DIRECT, 3);
   out[1] = dim_x;
   out[2] = dim_y;
   out[3] = dim_z;
@@ -892,7 +892,7 @@ inline constexpr uint32_t INDIRECT_BUFFER_MAX_SIZE_DWORDS = 0xFFFFF;
 inline uint32_t indirect_buffer(uint32_t *out, const void *ib_addr,
                                 uint32_t ib_size_dwords,
                                 CachePolicy policy = POLICY_LRU) {
-  out[0] = header(INDIRECT_BUFFER, 2);
+  out[0] = header(Opcode::INDIRECT_BUFFER, 2);
   out[1] = detail::lo(reinterpret_cast<uintptr_t>(ib_addr));
   out[2] = detail::hi(reinterpret_cast<uintptr_t>(ib_addr));
   out[3] = (ib_size_dwords & 0xFFFFFu) | (1u << 23) // VALID

@@ -146,7 +146,7 @@ Executable::load(Device &dev, std::span<const std::byte> image,
       size_t count = rela_size / sizeof(elf::Elf64_Rela);
       for (size_t i = 0; i < count; ++i) {
         const auto &rel = rela_table[i];
-        if (rel.getType() == elf::R_AMDGPU_RELATIVE64) {
+        if (rel.get_type() == elf::R_AMDGPU_RELATIVE64) {
           uint64_t value = load_bias + static_cast<uint64_t>(rel.r_addend);
           if (rel.r_offset < lo)
             continue;
@@ -209,7 +209,7 @@ std::expected<Kernel, Error> Executable::kernel(std::string_view name) const {
   if (sym->st_size < sizeof(abi::KernelDescriptor))
     return unexpected(EINVAL, "symbol '%.*s' too small for type",
                       static_cast<int>(name.size()), name.data());
-  if (sym->getType() != elf::STT_OBJECT || !name.ends_with(".kd"))
+  if (sym->get_type() != elf::STT_OBJECT || !name.ends_with(".kd"))
     return unexpected(EINVAL, "symbol '%.*s' not a kernel descriptor",
                       static_cast<int>(name.size()), name.data());
 

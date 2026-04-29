@@ -42,11 +42,11 @@ public:
   int render_fd() const { return drm_fd; }
   Context &context() const { return *ctx; }
 
-  std::string_view get_name() const {
+  std::string_view name() const {
     return detail::elf::get_name(detail::elf::get_mach(gfx_version()));
   }
 
-  // True if the device has PCI-e large bar enabled amd VRAM is host accessible.
+  // True if the device has PCI-e large bar enabled and VRAM is host accessible.
   bool vram_host_visible() const {
     for (size_t i = 0; i < info.memory_banks.size(); ++i)
       if (info.memory_banks[i].heap_type == 1)

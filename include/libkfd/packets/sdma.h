@@ -18,7 +18,7 @@
 namespace kfd::sdma {
 
 // References: amdgpu/navi10_sdma_pkt_open.h
-enum Op : uint8_t {
+enum class Opcode : uint8_t {
   NOP = 0,
   COPY = 1,
   FENCE = 5,
@@ -46,9 +46,9 @@ inline constexpr uint32_t MAX_COPY_LINEAR_22BIT = 0x3fffe0;
 inline constexpr uint32_t MAX_COPY_LINEAR_30BIT = 0x3ffffffe;
 
 inline uint32_t max_copy_linear_bytes(uint32_t gfx_version) {
-  uint32_t major = gfx_version / 10000;
-  uint32_t minor = (gfx_version / 100) % 100;
-  uint32_t step = gfx_version % 100;
+  uint32_t major = abi::gfx_version_major(gfx_version);
+  uint32_t minor = abi::gfx_version_minor(gfx_version);
+  uint32_t step = abi::gfx_version_step(gfx_version);
   if (major >= 11)
     return MAX_COPY_LINEAR_30BIT;
   if (major == 10 && minor >= 3)
@@ -63,7 +63,8 @@ inline uint32_t max_copy_linear_bytes(uint32_t gfx_version) {
 //
 // References: SDMA_PKT_NOP_HEADER_* in amdgpu/navi10_sdma_pkt_open.h
 inline uint32_t nop(uint32_t *out, uint32_t total_dwords) {
-  out[0] = static_cast<uint32_t>(total_dwords - 1) << 16;
+  out[0] = static_cast<uint32_t>(Opcode::NOP) |
+           (static_cast<uint32_t>(total_dwords - 1) << 16);
   for (uint32_t i = 1; i < total_dwords; ++i)
     out[i] = 0;
   return total_dwords;
@@ -84,7 +85,7 @@ inline uint32_t nop(uint32_t *out, uint32_t total_dwords) {
 //             sdma_v6_0_emit_copy_buffer in amdgpu/sdma_v6_0.c
 inline uint32_t copy_linear(uint32_t *out, void *dst, const void *src,
                             uint32_t bytes) {
-  out[0] = COPY;
+  out[0] = static_cast<uint32_t>(Opcode::COPY);
   out[1] = bytes > 0 ? bytes - 1 : 0;
   out[2] = 0;
   out[3] = detail::lo(reinterpret_cast<uintptr_t>(src));
@@ -110,9 +111,10 @@ inline uint32_t copy_linear(uint32_t *out, void *dst, const void *src,
 inline uint32_t fence(uint32_t *out, uint32_t gfx_version, void *addr,
                       uint32_t value) {
   if (gfx_version >= abi::GFX_VERSION_GFX9_A)
-    out[0] = FENCE | (3u << 16) | (1u << 20) | (1u << 22);
+    out[0] = static_cast<uint32_t>(Opcode::FENCE) | (3u << 16) | (1u << 20) |
+             (1u << 22);
   else
-    out[0] = FENCE;
+    out[0] = static_cast<uint32_t>(Opcode::FENCE);
   out[1] = detail::lo(reinterpret_cast<uintptr_t>(addr));
   out[2] = detail::hi(reinterpret_cast<uintptr_t>(addr));
   out[3] = value;
@@ -128,7 +130,7 @@ inline uint32_t fence(uint32_t *out, uint32_t gfx_version, void *addr,
 //
 // References: SDMA_PKT_TRAP_* in amdgpu/navi10_sdma_pkt_open.h
 inline uint32_t trap(uint32_t *out, uint32_t int_ctx) {
-  out[0] = TRAP;
+  out[0] = static_cast<uint32_t>(Opcode::TRAP);
   out[1] = int_ctx & 0x0FFFFFFFu;
   return TRAP_DWORDS;
 }
@@ -151,7 +153,7 @@ inline uint32_t trap(uint32_t *out, uint32_t int_ctx) {
 // References: SDMA_PKT_CONSTANT_FILL_* in amdgpu/navi10_sdma_pkt_open.h
 inline uint32_t const_fill(uint32_t *out, uint32_t gfx_version, void *dst,
                            uint32_t value, uint32_t bytes) {
-  out[0] = CONST_FILL | (2u << 30);
+  out[0] = static_cast<uint32_t>(Opcode::CONST_FILL) | (2u << 30);
   out[1] = detail::lo(reinterpret_cast<uintptr_t>(dst));
   out[2] = detail::hi(reinterpret_cast<uintptr_t>(dst));
   out[3] = value;
@@ -177,7 +179,8 @@ inline uint32_t poll_regmem(uint32_t *out, void *addr, Condition cond,
                             uint32_t value, uint32_t mask = 0xFFFFFFFF,
                             uint32_t interval = 0x0A,
                             uint32_t retry_count = 0xFFF) {
-  out[0] = POLL_REGMEM | (static_cast<uint32_t>(cond) << 28) | (1u << 31);
+  out[0] = static_cast<uint32_t>(Opcode::POLL_REGMEM) |
+           (static_cast<uint32_t>(cond) << 28) | (1u << 31);
   out[1] = detail::lo(reinterpret_cast<uintptr_t>(addr));
   out[2] = detail::hi(reinterpret_cast<uintptr_t>(addr));
   out[3] = value;
@@ -211,7 +214,8 @@ enum AtomicOp : uint32_t {
 inline uint32_t atomic_mem(uint32_t *out, AtomicOp op, void *addr,
                            int64_t src_data, int64_t cmp_data = 0) {
   uint32_t is_64_bit = (static_cast<uint32_t>(op) >= 0x20) ? 1u : 0u;
-  out[0] = ATOMIC | (is_64_bit << 16) | (static_cast<uint32_t>(op) << 25);
+  out[0] = static_cast<uint32_t>(Opcode::ATOMIC) | (is_64_bit << 16) |
+           (static_cast<uint32_t>(op) << 25);
   out[1] = detail::lo(reinterpret_cast<uintptr_t>(addr));
   out[2] = detail::hi(reinterpret_cast<uintptr_t>(addr));
   out[3] = detail::lo(static_cast<uint64_t>(src_data));
@@ -234,7 +238,7 @@ inline uint32_t atomic_mem(uint32_t *out, AtomicOp op, void *addr,
 //
 // References: SDMA_PKT_TIMESTAMP_* in amdgpu/navi10_sdma_pkt_open.h
 inline uint32_t timestamp(uint32_t *out, void *addr) {
-  out[0] = TIMESTAMP | (2u << 8); // sub_op = GET_GLOBAL
+  out[0] = static_cast<uint32_t>(Opcode::TIMESTAMP) | (2u << 8);
   out[1] = detail::lo(reinterpret_cast<uintptr_t>(addr));
   out[2] = detail::hi(reinterpret_cast<uintptr_t>(addr));
   return TIMESTAMP_DWORDS;
@@ -267,7 +271,7 @@ inline constexpr uint32_t GCR_FLUSH_ALL =
     GCR_GL2_INV | GCR_GL2_WB;
 
 inline uint32_t gcr_req(uint32_t *out, uint32_t gcr_cntl = GCR_FLUSH_ALL) {
-  out[0] = GCR_REQ;
+  out[0] = static_cast<uint32_t>(Opcode::GCR_REQ);
   out[1] = 0;
   out[2] = (gcr_cntl & 0xFFFFu) << 16;
   out[3] = (gcr_cntl >> 16) & 0x7u;

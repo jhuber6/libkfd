@@ -145,7 +145,7 @@ TEST_CASE("Memory - DMA-BUF export", "[memory][dmabuf]") {
     REQUIRE_RESULT(second);
     CHECK(second->fd() != dmabuf->fd());
 
-    // Verify the fd is actually closed when the DmaBuf is destroyed.
+    // Verify the fd is actually closed when the DMABuffer is destroyed.
     int saved_fd = dmabuf->fd();
     dmabuf = {};
     CHECK(::fcntl(saved_fd, F_GETFD) == -1);

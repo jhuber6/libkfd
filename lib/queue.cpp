@@ -243,7 +243,7 @@ void QueueBase::scratch_handler(Event &, void *user_data) {
 
     if (!allocated) {
       sctx->ib_buf[0] = pm4::header(
-          pm4::NOP,
+          pm4::Opcode::NOP,
           static_cast<uint16_t>(QueueBase::MAX_SCRATCH_IB_DWORDS - 2));
       __atomic_store_n(&sctx->error, ENOMEM, __ATOMIC_RELAXED);
       __atomic_store_n(sctx->scratch_done_ptr, next_seq, __ATOMIC_RELEASE);
@@ -263,7 +263,8 @@ void QueueBase::scratch_handler(Event &, void *user_data) {
                             req.kernel_code_properties);
   if (ib_n + 2 <= QueueBase::MAX_SCRATCH_IB_DWORDS) {
     uint32_t pad = QueueBase::MAX_SCRATCH_IB_DWORDS - ib_n;
-    sctx->ib_buf[ib_n] = pm4::header(pm4::NOP, static_cast<uint16_t>(pad - 2));
+    sctx->ib_buf[ib_n] =
+        pm4::header(pm4::Opcode::NOP, static_cast<uint16_t>(pad - 2));
   }
 
   // We are done, fire the signal to unblock the WAIT_REG_MEM stalling the CP.

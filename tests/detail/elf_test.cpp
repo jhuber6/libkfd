@@ -441,7 +441,7 @@ TEST_CASE("ELF - find_symbol kernel functions exist", "[elf]") {
         auto sym = elf->find_symbol(name);
         REQUIRE_RESULT(sym);
         REQUIRE(*sym != nullptr);
-        CHECK((*sym)->getType() == STT_FUNC);
+        CHECK((*sym)->get_type() == STT_FUNC);
         CHECK((*sym)->st_size > 0);
       }
     }
@@ -460,7 +460,7 @@ TEST_CASE("ELF - find_symbol globals exist as objects", "[elf]") {
         auto sym = elf->find_symbol(name);
         REQUIRE_RESULT(sym);
         REQUIRE(*sym != nullptr);
-        CHECK((*sym)->getType() == STT_OBJECT);
+        CHECK((*sym)->get_type() == STT_OBJECT);
         CHECK((*sym)->st_size == sizeof(unsigned));
       }
     }
@@ -487,7 +487,7 @@ TEST_CASE("ELF - find_symbol bss_arr is in a NOBITS section", "[elf]") {
       auto sym = elf->find_symbol("bss_arr");
       REQUIRE_RESULT(sym);
       REQUIRE(*sym != nullptr);
-      CHECK((*sym)->getType() == STT_OBJECT);
+      CHECK((*sym)->get_type() == STT_OBJECT);
       CHECK((*sym)->st_size == 4096);
 
       auto shdrs = elf->sections();

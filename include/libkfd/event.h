@@ -51,8 +51,6 @@ struct EventData {
 // then wake any event waiting on that index (id).
 class Event {
 public:
-  Event() = default;
-
   static std::expected<Event, Error> create(Context &ctx,
                                             EventType type = EventType::SIGNAL);
 
@@ -92,8 +90,11 @@ public:
 
 private:
   friend class Context;
+  friend class Signal;
   friend std::expected<void, Error> wait_all(std::span<Event *>, uint64_t);
   friend std::expected<size_t, Error> wait_any(std::span<Event *>, uint64_t);
+
+  Event() = default;
 
   Event(int fd, uint32_t id, uint32_t trigger, uint32_t slot_idx,
         void *slot_addr)

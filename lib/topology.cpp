@@ -414,8 +414,8 @@ std::pair<uint32_t, uint32_t> compute_cwsr_sizes(const NodeProperties &props) {
   uint32_t wg_data_size = static_cast<uint32_t>(
       align_up(size_t{cu_num} * wg_data_per_cu, page_size()));
 
-  uint32_t cntl_stack_bytes = (gfxv >= abi::GFX_VERSION_GFX10_1) ? 12u : 8u;
-  uint32_t ctl_stack_size = wave_num * cntl_stack_bytes + 8;
+  uint32_t ctl_stack_bytes = (gfxv >= abi::GFX_VERSION_GFX10_1) ? 12u : 8u;
+  uint32_t ctl_stack_size = wave_num * ctl_stack_bytes + 8;
   ctl_stack_size = align_up(CWSR_HEADER_SIZE + ctl_stack_size,
                             static_cast<uint32_t>(page_size()));
 

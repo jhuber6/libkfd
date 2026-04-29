@@ -220,6 +220,8 @@ std::expected<TrapHandlerBuffers, Error> setup_trap_handler(Device &dev) {
   return TrapHandlerBuffers{std::move(code), std::move(tma)};
 }
 
+constexpr size_t DOORBELL_PAGE_SIZE = 8192;
+
 } // namespace
 
 Device::Device(Context &ctx, NodeInfo info)
@@ -328,8 +330,6 @@ bool Device::loadable(std::span<const std::byte> image) const {
   return elf::is_compatible(elf->header().e_flags, gfx_version(), xnack,
                             sramecc);
 }
-
-static constexpr size_t DOORBELL_PAGE_SIZE = 8192;
 
 std::expected<volatile uint64_t *, Error>
 Device::doorbell(uint64_t raw_offset) {

@@ -207,7 +207,7 @@ std::expected<void, Error> Buffer::map(std::span<Device *const> targets) {
         break;
       }
     if (!found)
-      KFD_ASSERT(mapped_ids.push_back(id));
+      KFD_CHECK(mapped_ids.push_back(id));
   }
 
   return {};

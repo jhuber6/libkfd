@@ -76,8 +76,8 @@ struct Elf64_Sym {
   Elf64_Addr st_value;
   Elf64_Xword st_size;
 
-  uint8_t getBinding() const { return st_info >> 4; }
-  uint8_t getType() const { return st_info & 0xf; }
+  uint8_t get_binding() const { return st_info >> 4; }
+  uint8_t get_type() const { return st_info & 0xf; }
 };
 
 struct Elf64_Nhdr {
@@ -99,8 +99,8 @@ struct Elf64_Rela {
   Elf64_Xword r_info;
   Elf64_Sxword r_addend;
 
-  uint32_t getType() const { return static_cast<uint32_t>(r_info); }
-  uint32_t getSymbol() const { return static_cast<uint32_t>(r_info >> 32); }
+  uint32_t get_type() const { return static_cast<uint32_t>(r_info); }
+  uint32_t get_symbol() const { return static_cast<uint32_t>(r_info >> 32); }
 };
 
 // On-disk layout of a GNU hash table (.gnu.hash).
