@@ -301,6 +301,69 @@ TEST_CASE("Loader - R_AMDGPU_RELATIVE64 relocations applied",
   }
 }
 
+TEST_CASE("Loader - R_AMDGPU_ABS64 GOT relocation applied",
+          "[device][loader]") {
+  auto &ctx = require_ctx();
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = require_gpu(ctx, di);
+      auto fix = make_device_fixture(gpu, device_kernels);
+      if (!fix && fix.error().code == ENOEXEC)
+        SKIP(kfd::strerror(fix));
+      REQUIRE_RESULT(fix);
+
+      constexpr uint32_t THREADS = 64;
+
+      auto kernel = fix->exe.kernel("read_abs_global.kd");
+      REQUIRE_RESULT(kernel);
+      auto sym = fix->exe.symbol("abs_global");
+      REQUIRE_RESULT(sym);
+
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
+
+      // Seed abs_global in VRAM with a known pattern via SDMA.
+      auto seed = kfd::test::alloc_host_buffer(*fix->gpu);
+      auto *seed_vals = static_cast<unsigned *>(seed.data());
+      for (uint32_t i = 0; i < THREADS; ++i)
+        seed_vals[i] = 0xA0000000u + i;
+      REQUIRE_RESULT(fix->sdma.copy_linear(sym->data(), seed.data(),
+                                           THREADS * sizeof(unsigned)));
+      REQUIRE_RESULT(fix->sdma.signal(*sig));
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+
+      // read_abs_global reaches abs_global through a GOT slot, which only holds
+      // the correct VRAM address if the R_AMDGPU_ABS64 dynamic relocation was
+      // resolved at load time. A missed relocation faults or reads garbage.
+      auto out = kfd::test::alloc_host_buffer(*fix->gpu);
+      std::memset(out.data(), 0, THREADS * sizeof(unsigned));
+
+      struct Args {
+        unsigned *out;
+      };
+      Args args{.out = static_cast<unsigned *>(out.data())};
+
+      kfd::DispatchConfig cfg{.grid = {.x = 1}, .block = {.x = THREADS}};
+      auto kernarg = kernel->alloc();
+      REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, args, cfg);
+
+      REQUIRE_RESULT(sig->reset());
+      REQUIRE_RESULT(fix->compute.dispatch(*kernel, cfg, *kernarg));
+      REQUIRE_RESULT(fix->compute.signal(*sig));
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+
+      auto *vals = static_cast<const unsigned *>(out.data());
+      for (uint32_t i = 0; i < THREADS; ++i) {
+        INFO("abs_global[" << i << "]");
+        CHECK(vals[i] == 0xA0000000u + i);
+      }
+    }
+  }
+}
+
 TEST_CASE("Loader - kernel descriptor readable from host", "[device][loader]") {
   using namespace kfd::detail::elf;
   using namespace kfd::abi;

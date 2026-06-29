@@ -20,4 +20,10 @@ EXTERN_VIS unsigned *reloc_ptr_a = &reloc_target_a;
 EXTERN_VIS unsigned *reloc_ptr_b = &reloc_target_b;
 EXTERN_VIS void (*reloc_fptr)(void) = foo;
 
+// A preemptible symbol exports a R_AMDGPU_ABS64 dynamic relocation.
+[[gnu::visibility("default")]] unsigned abs_global[64];
+__gpu_kernel void read_abs_global(unsigned *out) {
+  out[__gpu_thread_id_x()] = abs_global[__gpu_thread_id_x()];
+}
+
 __gpu_kernel void use(void **ptr) { *ptr = bss_arr; }

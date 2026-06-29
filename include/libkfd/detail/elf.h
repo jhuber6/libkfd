@@ -198,12 +198,15 @@ inline constexpr Elf64_Word PT_GNU_RELRO = 0x6474e552;
 
 // Dynamic section tags (d_tag).
 inline constexpr Elf64_Sxword DT_NULL = 0;
+inline constexpr Elf64_Sxword DT_SYMTAB = 6;
 inline constexpr Elf64_Sxword DT_RELA = 7;
 inline constexpr Elf64_Sxword DT_RELASZ = 8;
 inline constexpr Elf64_Sxword DT_RELAENT = 9;
+inline constexpr Elf64_Sxword DT_SYMENT = 11;
 
 // AMDGPU relocation types.
 inline constexpr uint32_t R_AMDGPU_NONE = 0;
+inline constexpr uint32_t R_AMDGPU_ABS64 = 3;
 inline constexpr uint32_t R_AMDGPU_RELATIVE64 = 13;
 
 // Program header flags (p_flags).

@@ -107,9 +107,9 @@ Executable::load(Device &dev, std::span<const std::byte> image,
                 static_cast<size_t>(phdr.p_filesz));
   }
 
-  // The AMDGPU ABI exposes a single R_AMDGPU_RELATIVE64 dynamic relocation. We
-  // need to relocate these by simply adding the VRAM base address to all these
-  // symbols listed in the dynamic relocation section.
+  // The AMDGPU ABI exposes a R_AMDGPU_RELATIVE64 and R_AMDGPU_ABS64 dynamic
+  // relocation. We need to relocate these by simply adding the VRAM base
+  // address to all these symbols listed in the dynamic relocation section.
   uint64_t load_bias = reinterpret_cast<uintptr_t>(img.data()) - lo;
   for (const auto &phdr : elf.phdrs()) {
     if (phdr.p_type != elf::PT_DYNAMIC)
@@ -121,6 +121,7 @@ Executable::load(Device &dev, std::span<const std::byte> image,
 
     uint64_t rela_ptr = 0;
     uint64_t rela_size = 0;
+    uint64_t symtab_ptr = 0;
     for (const auto &dyn : dyns) {
       if (dyn.d_tag == elf::DT_NULL)
         break;
@@ -128,7 +129,17 @@ Executable::load(Device &dev, std::span<const std::byte> image,
         rela_ptr = dyn.d_un.d_ptr;
       else if (dyn.d_tag == elf::DT_RELASZ)
         rela_size = dyn.d_un.d_val;
+      else if (dyn.d_tag == elf::DT_SYMTAB)
+        symtab_ptr = dyn.d_un.d_ptr;
     }
+
+    // The dynamic symbol table lives inside a loaded segment, so it is present
+    // in the staging buffer. Symbol-based relocations need it to resolve their
+    // target addresses.
+    const elf::Elf64_Sym *symtab = nullptr;
+    if (symtab_ptr && symtab_ptr >= lo && symtab_ptr - lo < footprint)
+      symtab = reinterpret_cast<const elf::Elf64_Sym *>(
+          static_cast<const char *>(pinned.data()) + symtab_ptr - lo);
 
     if (rela_ptr && rela_size) {
       if (rela_ptr < lo || rela_ptr - lo > footprint ||
@@ -146,15 +157,28 @@ Executable::load(Device &dev, std::span<const std::byte> image,
       size_t count = rela_size / sizeof(elf::Elf64_Rela);
       for (size_t i = 0; i < count; ++i) {
         const auto &rel = rela_table[i];
-        if (rel.get_type() == elf::R_AMDGPU_RELATIVE64) {
-          uint64_t value = load_bias + static_cast<uint64_t>(rel.r_addend);
-          if (rel.r_offset < lo)
-            continue;
-          uint64_t off = rel.r_offset - lo;
-          if (off + sizeof(uint64_t) <= footprint)
-            std::memcpy(static_cast<char *>(pinned.data()) + off, &value,
-                        sizeof(uint64_t));
+        uint32_t type = rel.get_type();
+
+        uint64_t value;
+        if (type == elf::R_AMDGPU_RELATIVE64) {
+          value = load_bias + static_cast<uint64_t>(rel.r_addend);
+        } else if (type == elf::R_AMDGPU_ABS64) {
+          if (!symtab)
+            return unexpected(ENOEXEC,
+                              "R_AMDGPU_ABS64 relocation without DT_SYMTAB");
+          const elf::Elf64_Sym &sym = symtab[rel.get_symbol()];
+          value =
+              load_bias + sym.st_value + static_cast<uint64_t>(rel.r_addend);
+        } else {
+          continue;
         }
+
+        if (rel.r_offset < lo)
+          continue;
+        uint64_t off = rel.r_offset - lo;
+        if (off + sizeof(uint64_t) <= footprint)
+          std::memcpy(static_cast<char *>(pinned.data()) + off, &value,
+                      sizeof(uint64_t));
       }
     }
     break;
