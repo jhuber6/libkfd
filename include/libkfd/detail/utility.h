@@ -73,6 +73,14 @@ template <typename T> constexpr T align_up(T value, T alignment) {
 #endif
 }
 
+template <typename T> constexpr T align_down(T value, T alignment) {
+#if __has_builtin(__builtin_align_down)
+  return __builtin_align_down(value, alignment);
+#else
+  return value & ~(alignment - 1);
+#endif
+}
+
 // Equivalent to s.substr(pos, count) without the out_of_range throw path.
 inline std::string_view slice(std::string_view s, size_t pos, size_t count) {
   return {s.data() + pos, count};

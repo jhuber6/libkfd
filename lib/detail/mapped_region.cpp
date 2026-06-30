@@ -83,21 +83,24 @@ std::expected<MappedRegion, Error> MappedRegion::rebind(int fd, int prot,
 }
 
 MappedRegion::~MappedRegion() {
-  if (addr)
+  if (addr && owning)
     KFD_ASSERT(checked_munmap(addr, len));
 }
 
 MappedRegion &MappedRegion::operator=(MappedRegion &&other) {
   if (this != &other) {
-    if (addr)
+    if (addr && owning)
       KFD_ASSERT(checked_munmap(addr, len));
     addr = std::exchange(other.addr, nullptr);
     len = std::exchange(other.len, 0);
+    owning = std::exchange(other.owning, true);
   }
   return *this;
 }
 
 bool MappedRegion::try_grow(size_t new_size) {
+  if (!owning)
+    return false;
   if (new_size <= len)
     return true;
   void *result = ::mremap(addr, len, new_size, 0);

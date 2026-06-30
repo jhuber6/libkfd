@@ -35,6 +35,11 @@ public:
   static std::expected<MappedRegion, Error> reserve_aligned(size_t length,
                                                             size_t alignment);
 
+  // Wrap an existing memory region that will not be automatically unmapped.
+  static MappedRegion borrow(void *addr, size_t length) {
+    return MappedRegion(addr, length, /*owning=*/false);
+  }
+
   // Replace this reservation with a file-backed mapping at the same address
   // via MAP_FIXED. Consumes the old region and returns a new one.
   std::expected<MappedRegion, Error> rebind(int fd, int prot, off_t offset);
@@ -46,7 +51,8 @@ public:
 
   MappedRegion(MappedRegion &&other)
       : addr(std::exchange(other.addr, nullptr)),
-        len(std::exchange(other.len, 0)) {}
+        len(std::exchange(other.len, 0)),
+        owning(std::exchange(other.owning, true)) {}
 
   MappedRegion &operator=(MappedRegion &&other);
 
@@ -71,10 +77,12 @@ public:
   explicit operator bool() const { return addr != nullptr; }
 
 private:
-  explicit MappedRegion(void *addr, size_t len) : addr(addr), len(len) {}
+  explicit MappedRegion(void *addr, size_t len, bool owning = true)
+      : addr(addr), len(len), owning(owning) {}
 
   void *addr = nullptr;
   size_t len = 0;
+  bool owning = true;
 };
 
 } // namespace kfd::detail

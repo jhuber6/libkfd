@@ -157,6 +157,33 @@ std::expected<Buffer, Error> Buffer::pin(Device &dev, const void *ptr,
 }
 
 std::expected<Buffer, Error>
+Buffer::register_host(Device &dev, void *ptr, size_t size, MemFlags flags) {
+  if (ptr == nullptr || size == 0)
+    return kfd::unexpected(EINVAL, "register_host: empty range");
+
+  Context &ctx = dev.context();
+
+  // KFD registers the whole page so we need to round to the page boundary.
+  uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+  uintptr_t base = align_down(addr, static_cast<uintptr_t>(page_size()));
+  uintptr_t end = align_up(addr + size, static_cast<uintptr_t>(page_size()));
+  ioctl::kfd::alloc_memory_of_gpu_args alloc_args{
+      .va_addr = base,
+      .size = end - base,
+      .mmap_offset = base,
+      .gpu_id = dev.gpu_id(),
+      .flags = static_cast<uint32_t>(KFD_IOC_ALLOC_MEM_FLAGS_USERPTR) |
+               static_cast<uint32_t>(flags),
+  };
+
+  KFD_CHECK(
+      ioctl::call<ioctl::kfd::ALLOC_MEMORY_OF_GPU>(ctx.kfd_fd(), alloc_args));
+
+  return Buffer(alloc_args.handle, size, MappedRegion::borrow(ptr, size), {},
+                &dev, {});
+}
+
+std::expected<Buffer, Error>
 Buffer::pin_region(Device &dev, MappedRegion region, MemFlags flags) {
   Context &ctx = dev.context();
   size_t size = region.size();

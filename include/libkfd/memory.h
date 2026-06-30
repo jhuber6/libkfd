@@ -87,6 +87,11 @@ public:
                                           size_t size,
                                           MemFlags flags = MemFlags::WRITABLE);
 
+  // Register the memory region in-place at page granularity.
+  static std::expected<Buffer, Error>
+  register_host(Device &dev, void *ptr, size_t size,
+                MemFlags flags = MemFlags::WRITABLE);
+
   // Map this buffer to the device's page tables. Must be done before accessing.
   std::expected<void, Error> map(std::span<Device *const> targets);
   std::expected<void, Error> map(Device &device);
