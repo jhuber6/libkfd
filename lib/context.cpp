@@ -9,16 +9,15 @@
 #include "ioctl.h"
 #include "libkfd/event.h"
 #include "libkfd/memory.h"
+#include "libkfd/signal.h"
 
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
-#include <linux/futex.h>
-#include <sched.h>
+#include <pthread.h>
 #include <sys/mman.h>
-#include <sys/syscall.h>
 #include <unistd.h>
 
 using namespace kfd::detail;
@@ -73,24 +72,45 @@ Mutex signal_page_mtx{};
 uint32_t runtime_enabled = 0;
 Mutex runtime_mtx{};
 
+// Default fault policy describes the fault on stderr and terminates.
+void default_fault_handler(const FaultInfo &f, void *) {
+  if (f.kind == FaultInfo::Kind::MemoryViolation) {
+    std::fprintf(stderr, "GPU memory fault at VA 0x%lx (gpu_id %u, error %u):",
+                 static_cast<unsigned long>(f.memory.va), f.gpu_id,
+                 f.memory.error_type);
+    if (f.memory.reason & MemoryFaultInfo::NotPresent)
+      std::fprintf(stderr, " page-not-present");
+    if (f.memory.reason & MemoryFaultInfo::ReadOnly)
+      std::fprintf(stderr, " read-only");
+    if (f.memory.reason & MemoryFaultInfo::NoExecute)
+      std::fprintf(stderr, " no-execute");
+    if (f.memory.reason & MemoryFaultInfo::Imprecise)
+      std::fprintf(stderr, " imprecise");
+    std::fprintf(stderr, "\n");
+    ::raise(SIGSEGV);
+  } else {
+    std::fprintf(stderr,
+                 "GPU HW exception (gpu_id %u): reset_type=%u reset_cause=%u "
+                 "memory_lost=%u\n",
+                 f.gpu_id, f.hardware.reset_type, f.hardware.reset_cause,
+                 f.hardware.memory_lost);
+    ::raise(SIGABRT);
+  }
+}
+
 } // namespace
 
-constexpr size_t WATCHER_STACK_SIZE = 64ull * 1024;
-
 struct FaultWatcher {
-  FaultWatcher(Event mem, Event hw, Event wake, void *stack)
+  FaultWatcher(Event mem, Event hw, Event wake)
       : mem_event(std::move(mem)), hw_event(std::move(hw)),
-        wake_event(std::move(wake)), stack(stack) {}
+        wake_event(std::move(wake)) {}
 
   ~FaultWatcher() {
-    if (tid != 0) {
+    if (started) {
       __atomic_store_n(&exit_flag, 1, __ATOMIC_RELEASE);
       KFD_ASSERT(wake_event.signal());
-      for (pid_t val; (val = __atomic_load_n(&tid, __ATOMIC_ACQUIRE)) != 0;)
-        ::syscall(SYS_futex, &tid, FUTEX_WAIT, val, nullptr, nullptr, 0);
+      ::pthread_join(thread, nullptr);
     }
-    if (stack)
-      KFD_ASSERT(checked_munmap(stack, WATCHER_STACK_SIZE));
   }
 
   struct WatchEntry {
@@ -100,19 +120,93 @@ struct FaultWatcher {
     uint32_t event_id;
   };
 
+  // A one-shot host callback fired when a signal's fence reaches its target.
+  struct CompletionEntry {
+    uint64_t *fence;
+    Condition cond;
+    uint64_t value;
+    SignalHandler callback;
+    void *user_data;
+    uint32_t event_id;
+  };
+
   Event mem_event;
   Event hw_event;
   Event wake_event;
   uint32_t exit_flag = 0;
-  pid_t tid = 0;
-  void *stack;
+  pthread_t thread = {};
+  bool started = false;
   Mutex watch_mtx;
   SmallVector<WatchEntry, 8> watches;
+  SmallVector<CompletionEntry, 8> completions;
+  FaultHandler fault_handler = default_fault_handler;
+  void *fault_user_data = nullptr;
 };
 
 namespace {
 
-int fault_watcher_entry(void *arg) {
+bool condition_met(Condition cond, uint64_t cur, uint64_t target) {
+  switch (cond) {
+  case Condition::LT:
+    return cur < target;
+  case Condition::LTE:
+    return cur <= target;
+  case Condition::EQ:
+    return cur == target;
+  case Condition::NE:
+    return cur != target;
+  case Condition::GTE:
+    return cur >= target;
+  case Condition::GT:
+    return cur > target;
+  }
+  __builtin_unreachable();
+}
+
+FaultInfo make_memory_fault(const ioctl::kfd::event_data &e) {
+  const auto &d = e.memory_exception_data;
+  uint32_t reason = 0;
+  if (d.failure.NotPresent)
+    reason |= MemoryFaultInfo::NotPresent;
+  if (d.failure.ReadOnly)
+    reason |= MemoryFaultInfo::ReadOnly;
+  if (d.failure.NoExecute)
+    reason |= MemoryFaultInfo::NoExecute;
+  if (d.failure.imprecise)
+    reason |= MemoryFaultInfo::Imprecise;
+  FaultInfo info{.kind = FaultInfo::Kind::MemoryViolation, .gpu_id = d.gpu_id};
+  info.memory = {.va = d.va, .reason = reason, .error_type = d.ErrorType};
+  return info;
+}
+
+FaultInfo make_hw_exception(const ioctl::kfd::event_data &e) {
+  const auto &d = e.hw_exception_data;
+  FaultInfo info{.kind = FaultInfo::Kind::HardwareException,
+                 .gpu_id = d.gpu_id};
+  info.hardware = {.reset_type = d.reset_type,
+                   .reset_cause = d.reset_cause,
+                   .memory_lost = d.memory_lost};
+  return info;
+}
+
+void dispatch_faults(FaultWatcher *w, const ioctl::kfd::event_data &mem,
+                     const ioctl::kfd::event_data &hw) {
+  if (!mem.memory_exception_data.gpu_id && !hw.hw_exception_data.gpu_id)
+    return;
+  FaultHandler handler;
+  void *user_data;
+  {
+    LockGuard guard(w->watch_mtx);
+    handler = w->fault_handler;
+    user_data = w->fault_user_data;
+  }
+  if (mem.memory_exception_data.gpu_id)
+    handler(make_memory_fault(mem), user_data);
+  if (hw.hw_exception_data.gpu_id)
+    handler(make_hw_exception(hw), user_data);
+}
+
+void *fault_watcher_entry(void *arg) {
   auto *w = static_cast<FaultWatcher *>(arg);
 
   // We cannot use the raw Event * interface because the user could move the
@@ -136,6 +230,11 @@ int fault_watcher_entry(void *arg) {
         ed.event_id = we.event_id;
         KFD_ASSERT(eds.push_back(ed));
       }
+      for (auto &c : w->completions) {
+        ioctl::kfd::event_data ed{};
+        ed.event_id = c.event_id;
+        KFD_ASSERT(eds.push_back(ed));
+      }
     }
 
     ioctl::kfd::event_data wake_ed{};
@@ -155,38 +254,31 @@ int fault_watcher_entry(void *arg) {
     if (__atomic_load_n(&w->exit_flag, __ATOMIC_ACQUIRE))
       break;
 
-    if (eds[0].memory_exception_data.gpu_id) {
-      auto &d = eds[0].memory_exception_data;
-      std::fprintf(stderr,
-                   "GPU memory fault at VA 0x%lx (gpu_id %u, error %u):",
-                   static_cast<unsigned long>(d.va), d.gpu_id, d.ErrorType);
-      if (d.failure.NotPresent)
-        std::fprintf(stderr, " page-not-present");
-      if (d.failure.ReadOnly)
-        std::fprintf(stderr, " read-only");
-      if (d.failure.NoExecute)
-        std::fprintf(stderr, " no-execute");
-      if (d.failure.imprecise)
-        std::fprintf(stderr, " imprecise");
-      std::fprintf(stderr, "\n");
-      ::raise(SIGSEGV);
-    }
+    // Slots 0 and 1 are the watcher's own memory and hardware exception events.
+    dispatch_faults(w, eds[0], eds[1]);
 
-    if (eds[1].hw_exception_data.gpu_id) {
-      auto &d = eds[1].hw_exception_data;
-      std::fprintf(stderr,
-                   "GPU HW exception (gpu_id %u): reset_type=%u "
-                   "reset_cause=%u memory_lost=%u",
-                   d.gpu_id, d.reset_type, d.reset_cause, d.memory_lost);
-      ::raise(SIGABRT);
+    SmallVector<FaultWatcher::CompletionEntry, 8> fired;
+    {
+      LockGuard guard(w->watch_mtx);
+      for (auto &we : w->watches)
+        we.callback(*we.event, we.user_data);
+      for (size_t i = 0; i < w->completions.size();) {
+        auto &c = w->completions[i];
+        if (condition_met(c.cond, __atomic_load_n(c.fence, __ATOMIC_ACQUIRE),
+                          c.value)) {
+          KFD_ASSERT(fired.push_back(c));
+          w->completions[i] = w->completions[w->completions.size() - 1];
+          w->completions.pop_back();
+        } else {
+          ++i;
+        }
+      }
     }
-
-    LockGuard guard(w->watch_mtx);
-    for (auto &we : w->watches)
-      we.callback(*we.event, we.user_data);
+    for (auto &c : fired)
+      c.callback(c.user_data);
   }
 
-  return 0;
+  return nullptr;
 }
 
 // Start the dedicated fault watcher background thread. This will sleep until an
@@ -196,32 +288,19 @@ std::expected<Box<FaultWatcher>, Error> start_fault_watcher(Context &ctx) {
   auto hw_ev = KFD_TRY(Event::create(ctx, EventType::HW_EXCEPTION));
   auto wake_ev = KFD_TRY(Event::create(ctx, EventType::SIGNAL));
 
-  void *stack = ::mmap(nullptr, WATCHER_STACK_SIZE, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
-  if (stack == MAP_FAILED)
-    return kfd::unexpected(errno, "failed to mmap fault watcher stack");
-
   auto result = Box<FaultWatcher>::create(std::move(mem_ev), std::move(hw_ev),
-                                          std::move(wake_ev), stack);
-  if (!result) {
-    KFD_ASSERT(checked_munmap(stack, WATCHER_STACK_SIZE));
+                                          std::move(wake_ev));
+  if (!result)
     return kfd::unexpected(result.error());
-  }
   auto watcher = std::move(*result);
 
   // Fork to an independent thread so the KFD process is shared.
-  void *stack_top = static_cast<char *>(stack) + WATCHER_STACK_SIZE;
-  pid_t child = ::clone(fault_watcher_entry, stack_top,
-                        CLONE_VM | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
-                            CLONE_SYSVSEM | CLONE_CHILD_CLEARTID,
-                        watcher.get(),
-                        /*parent_tid=*/nullptr,
-                        /*tls=*/nullptr,
-                        /*child_tid=*/&watcher->tid);
-  if (child == -1)
-    return kfd::unexpected(errno, "failed to clone fault watcher thread");
+  int err = ::pthread_create(&watcher->thread, nullptr, fault_watcher_entry,
+                             watcher.get());
+  if (err != 0)
+    return kfd::unexpected(err, "failed to create fault watcher thread");
 
-  watcher->tid = child;
+  watcher->started = true;
   return watcher;
 }
 
@@ -233,6 +312,29 @@ std::expected<void, Error> add_watch(FaultWatcher *watcher, Event *event,
   KFD_CHECK(
       watcher->watches.push_back({event, cb, user_data, event->event_id()}));
   return watcher->wake_event.signal();
+}
+
+std::expected<void, Error> add_completion(FaultWatcher *watcher,
+                                          uint64_t *fence, Condition cond,
+                                          uint64_t value, uint32_t event_id,
+                                          SignalHandler cb, void *user_data) {
+  if (!watcher)
+    return kfd::unexpected(EINVAL, "register_handler requires a fault watcher");
+  LockGuard guard(watcher->watch_mtx);
+  KFD_CHECK(watcher->completions.push_back(
+      {fence, cond, value, cb, user_data, event_id}));
+  return watcher->wake_event.signal();
+}
+
+std::expected<void, Error> set_fault_handler(FaultWatcher *watcher,
+                                             FaultHandler cb, void *user_data) {
+  if (!watcher)
+    return kfd::unexpected(EINVAL,
+                           "set_fault_handler requires a fault watcher");
+  LockGuard guard(watcher->watch_mtx);
+  watcher->fault_handler = cb ? cb : default_fault_handler;
+  watcher->fault_user_data = cb ? user_data : nullptr;
+  return {};
 }
 
 std::expected<void, Error> remove_watch(FaultWatcher *watcher, Event *event) {
@@ -444,6 +546,18 @@ std::expected<void, Error> Context::watch_event(Event &event, WatchCallback cb,
 
 std::expected<void, Error> Context::unwatch_event(Event &event) {
   return remove_watch(fault_watcher.get(), &event);
+}
+
+std::expected<void, Error>
+Context::register_handler(Signal &sig, Condition cond, uint64_t value,
+                          SignalHandler cb, void *user_data) {
+  return add_completion(fault_watcher.get(), sig.fence_addr(), cond, value,
+                        sig.event_id(), cb, user_data);
+}
+
+std::expected<void, Error> Context::register_handler(FaultHandler cb,
+                                                     void *user_data) {
+  return set_fault_handler(fault_watcher.get(), cb, user_data);
 }
 
 } // namespace kfd

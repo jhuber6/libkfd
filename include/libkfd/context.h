@@ -8,6 +8,7 @@
 #ifndef LIBKFD_CONTEXT_H
 #define LIBKFD_CONTEXT_H
 
+#include "libkfd/condition.h"
 #include "libkfd/detail/box.h"
 #include "libkfd/detail/small_vector.h"
 #include "libkfd/device.h"
@@ -18,10 +19,49 @@
 namespace kfd {
 
 class Event;
+class Signal;
 struct FaultWatcher;
 
 // Callback invoked by the fault watcher when a watched event fires.
 using WatchCallback = void (*)(Event &event, void *user_data);
+
+struct MemoryFaultInfo {
+  // Bitmask of reasons a memory access faulted.
+  enum Reason : uint32_t {
+    NotPresent = 1u << 0,
+    ReadOnly = 1u << 1,
+    NoExecute = 1u << 2,
+    Imprecise = 1u << 3,
+  };
+  uint64_t va;
+  uint32_t reason;
+  uint32_t error_type;
+};
+
+struct HardwareExceptionInfo {
+  uint32_t reset_type;
+  uint32_t reset_cause;
+  uint32_t memory_lost;
+};
+
+struct FaultInfo {
+  enum class Kind : uint32_t {
+    MemoryViolation,
+    HardwareException,
+  };
+  Kind kind;
+  uint32_t gpu_id;
+  union {
+    MemoryFaultInfo memory;
+    HardwareExceptionInfo hardware;
+  };
+};
+
+// Invoked once by the watcher thread on hardware exception.
+using FaultHandler = void (*)(const FaultInfo &fault, void *user_data);
+
+// Invoked once by the watcher thread when a signal reaches its target value.
+using SignalHandler = void (*)(void *user_data);
 
 struct VersionInfo {
   uint32_t major;
@@ -54,6 +94,12 @@ public:
 
   std::span<Device> devices() { return nodes; }
   std::expected<Device *, Error> device(size_t i);
+
+  // Register a custom handler with the context's watcher thread.
+  std::expected<void, Error> register_handler(Signal &sig, Condition cond,
+                                              uint64_t value, SignalHandler cb,
+                                              void *user_data);
+  std::expected<void, Error> register_handler(FaultHandler cb, void *user_data);
 
 private:
   friend class QueueBase;

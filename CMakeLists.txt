@@ -94,6 +94,9 @@ set(library_compile_options
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBDRM_AMDGPU REQUIRED libdrm_amdgpu)
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 add_library(kfd STATIC)
 add_library(libkfd::kfd ALIAS kfd)
 
@@ -110,7 +113,7 @@ set_target_properties(kfd PROPERTIES
   POSITION_INDEPENDENT_CODE ON
   INTERFACE_POSITION_INDEPENDENT_CODE ON)
 
-target_link_libraries(kfd PUBLIC ${LIBDRM_AMDGPU_LIBRARIES})
+target_link_libraries(kfd PUBLIC ${LIBDRM_AMDGPU_LIBRARIES} Threads::Threads)
 target_compile_options(kfd PRIVATE ${common_compile_options}
                        ${library_compile_options})
 
