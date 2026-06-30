@@ -22,6 +22,8 @@ set(trap_arch_defines "")
 foreach(arch IN LISTS LIBKFD_GPU_ARCHS)
     set(target trap_handler_${arch}.bin)
     add_executable(${target} device/trap_handler.S)
+    set_target_properties(${target} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
     target_compile_options(${target} PRIVATE
       --target=amdgcn--amdhsa
       -mcpu=${arch}

@@ -105,7 +105,11 @@ target_include_directories(kfd PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/lib
   ${LIBDRM_AMDGPU_INCLUDE_DIRS}
 )
-target_compile_features(kfd PUBLIC cxx_std_23)
+target_compile_features(kfd PUBLIC cxx_std_23 c_std_23)
+set_target_properties(kfd PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+  INTERFACE_POSITION_INDEPENDENT_CODE ON)
+
 target_link_libraries(kfd PUBLIC ${LIBDRM_AMDGPU_LIBRARIES})
 target_compile_options(kfd PRIVATE ${common_compile_options}
                        ${library_compile_options})
