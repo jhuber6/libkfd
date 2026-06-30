@@ -59,7 +59,7 @@ std::string_view get_name(uint32_t mach) {
 #define X(NUM, ENUM, NAME, VER)                                                \
   case NUM:                                                                    \
     return NAME;
-    AMDGPU_MACH_LIST(X)
+    KFD_AMDGPU_MACH_LIST(X)
 #undef X
   default:
     return {};
@@ -72,7 +72,7 @@ uint32_t get_gfx_version(uint32_t mach) {
 #define X(NUM, ENUM, NAME, VER)                                                \
   case NUM:                                                                    \
     return VER;
-    AMDGPU_MACH_LIST(X)
+    KFD_AMDGPU_MACH_LIST(X)
 #undef X
   default:
     return 0;
@@ -87,7 +87,7 @@ uint32_t get_mach(uint32_t gfx_version) {
   };
   static constexpr Entry TABLE[] = {
 #define X(NUM, ENUM, NAME, VER) {VER, NUM},
-      AMDGPU_MACH_LIST(X)
+      KFD_AMDGPU_MACH_LIST(X)
 #undef X
   };
   for (const auto &e : TABLE)

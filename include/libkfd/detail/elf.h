@@ -230,7 +230,7 @@ inline constexpr uint8_t ELFABIVERSION_AMDGPU_HSA_V6 = 4;
 // clang-format off
 
 // X-macro table of all AMDGPU machine IDs.
-#define AMDGPU_MACH_LIST(X)                                                    \
+#define KFD_AMDGPU_MACH_LIST(X)                                                    \
   X(0x20, EF_AMDGPU_MACH_AMDGCN_GFX600, "gfx600", 60000)                       \
   X(0x21, EF_AMDGPU_MACH_AMDGCN_GFX601, "gfx601", 60001)                       \
   X(0x22, EF_AMDGPU_MACH_AMDGCN_GFX700, "gfx700", 70000)                       \
@@ -295,7 +295,7 @@ enum : unsigned {
   EF_AMDGPU_MACH_NONE = 0x000,
 
 #define X(NUM, ENUM, NAME, VER) ENUM = NUM,
-  AMDGPU_MACH_LIST(X)
+  KFD_AMDGPU_MACH_LIST(X)
 #undef X
 
   EF_AMDGPU_MACH_AMDGCN_FIRST = EF_AMDGPU_MACH_AMDGCN_GFX600,
