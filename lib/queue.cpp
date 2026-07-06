@@ -67,6 +67,13 @@ struct ScratchCtx {
 
 namespace {
 
+// Number of 32-bit words needed to hold one bit per compute unit on the node.
+uint32_t device_cu_words(const Device &dev) {
+  const NodeProperties &p = dev.properties();
+  uint32_t cu_count = p.simd_count / (p.simd_per_cu ? p.simd_per_cu : 1);
+  return align_up(cu_count, 32u) / 32;
+}
+
 // Value is hard-coded by the kernel driver.
 constexpr size_t EOP_BUFFER_SIZE = 4096;
 constexpr MemFlags QUEUE_GTT_FLAGS = MemFlags::WRITABLE | MemFlags::EXECUTABLE |
@@ -646,6 +653,14 @@ ComputeQueue::create(Device &dev, size_t ring_size, uint32_t target_xcc) {
 
   ComputeQueue q(std::move(base), std::move(eop_vram));
 
+  const NodeProperties &p = dev.properties();
+  uint32_t cu_count = p.simd_count / (p.simd_per_cu ? p.simd_per_cu : 1);
+  KFD_CHECK(q.cu_mask_words.resize(align_up(cu_count, 32u) / 32));
+  for (size_t i = 0; i < q.cu_mask_words.size(); ++i) {
+    uint32_t bits = cu_count - static_cast<uint32_t>(i) * 32;
+    q.cu_mask_words[i] = bits >= 32 ? 0xFFFFFFFF : (1u << bits) - 1;
+  }
+
   uint32_t init[2 * pm4::WRITE_DATA_DWORDS];
   auto *eop_u32 = static_cast<uint32_t *>(q.eop_seq.data());
   pm4::write_data(init, eop_u32, 0);
@@ -773,6 +788,26 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
       pm4::dispatch_initiator(kd, base.dev->gfx_version()));
 
   return base.submit_impl(buf, n);
+}
+
+std::expected<void, Error>
+ComputeQueue::set_cu_mask(std::span<const uint32_t> mask) {
+  if (mask.empty())
+    return kfd::unexpected(EINVAL, "CU mask must not be empty");
+
+  // Trim any tail past the device's CU count; those bits address nothing.
+  size_t words = detail::min(mask.size(), size_t{device_cu_words(*base.dev)});
+  ioctl::kfd::set_cu_mask_args args{
+      .queue_id = base.queue_id(),
+      .num_cu_mask = static_cast<uint32_t>(words * 32),
+      .cu_mask_ptr = reinterpret_cast<uintptr_t>(mask.data()),
+  };
+  KFD_CHECK(
+      ioctl::call<ioctl::kfd::SET_CU_MASK>(base.dev->context().kfd_fd(), args));
+
+  KFD_CHECK(cu_mask_words.resize(words));
+  std::memcpy(cu_mask_words.data(), mask.data(), words * sizeof(uint32_t));
+  return {};
 }
 
 std::expected<CooperativeQueue, Error>

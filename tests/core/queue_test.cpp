@@ -1,6 +1,7 @@
 #include "test_helpers.h"
 
 #include <atomic>
+#include <bit>
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
 #include <ctime>
@@ -54,6 +55,39 @@ TEST_CASE("Queue - creates and destroys cleanly", "[queue]") {
       REQUIRE_RESULT(queue);
       CHECK(queue->queue_id() >= 0);
       CHECK(queue->ring_dwords() > 0);
+    }
+  }
+}
+
+TEST_CASE("Queue - CU mask restricts and still executes", "[queue]") {
+  auto &ctx = require_ctx();
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = require_gpu(ctx, di);
+
+      auto queue = kfd::ComputeQueue::create(gpu);
+      REQUIRE_RESULT(queue);
+
+      const auto &pr = gpu.properties();
+      uint32_t cu_count = pr.simd_count / (pr.simd_per_cu ? pr.simd_per_cu : 1);
+      uint32_t set_bits = 0;
+      for (uint32_t word : queue->cu_mask())
+        set_bits += static_cast<uint32_t>(std::popcount(word));
+      CHECK(set_bits == cu_count);
+
+      CHECK_FALSE(queue->set_cu_mask({}).has_value());
+
+      uint32_t mask = 0xFFFFFFFF;
+      REQUIRE_RESULT(queue->set_cu_mask({&mask, 1}));
+
+      REQUIRE(queue->cu_mask().size() == 1);
+      CHECK(queue->cu_mask()[0] == mask);
+
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
+      REQUIRE_RESULT(queue->signal(*sig));
+      CHECK_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
     }
   }
 }

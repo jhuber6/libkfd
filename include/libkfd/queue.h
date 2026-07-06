@@ -14,6 +14,7 @@
 #include "libkfd/abi.h"
 #include "libkfd/detail/box.h"
 #include "libkfd/detail/mutex.h"
+#include "libkfd/detail/small_vector.h"
 #include "libkfd/detail/utility.h"
 #include "libkfd/device.h"
 #include "libkfd/loader.h"
@@ -26,6 +27,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <span>
 
 namespace kfd {
 
@@ -285,6 +287,12 @@ public:
     return signal(completion);
   }
 
+  // Sets the bitfield controlling with CUs workgroups can be dispatched to.
+  std::expected<void, Error> set_cu_mask(std::span<const uint32_t> mask);
+  std::span<const uint32_t> cu_mask() const {
+    return {cu_mask_words.data(), cu_mask_words.size()};
+  }
+
   uint32_t gfx_version() const { return base.dev->gfx_version(); }
   uint32_t queue_id() const { return base.queue_id(); }
   size_t ring_dwords() const { return base.ring_dwords(); }
@@ -305,6 +313,7 @@ private:
   QueueBase base;
   uint32_t next_eop_seq = 0;
   bool cooperative = false;
+  detail::SmallVector<uint32_t, 8> cu_mask_words;
 };
 
 // A compute queue that is exclusively scheduled (non-preemptible). Dispatches
