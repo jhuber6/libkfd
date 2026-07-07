@@ -130,7 +130,7 @@ void report_queue_exception(uint32_t queue_id, uint32_t gpu_id, uint64_t code) {
 
 } // namespace
 
-void QueueBase::queue_error_handler(Event &, void *user_data) {
+bool QueueBase::queue_error_handler(void *user_data) {
   auto *ectx = static_cast<QueueErrorCtx *>(user_data);
   uint64_t err = __atomic_load_n(ectx->err_payload, __ATOMIC_ACQUIRE);
   if (err) {
@@ -138,11 +138,12 @@ void QueueBase::queue_error_handler(Event &, void *user_data) {
     __atomic_store_n(ectx->err_payload, 0, __ATOMIC_RELEASE);
     ::raise(SIGABRT);
   }
+  return true;
 }
 
 // The GPU stalls for each pending scratch allocation. This function will be
 // called once for every scratch request made.
-void QueueBase::scratch_handler(Event &, void *user_data) {
+bool QueueBase::scratch_handler(void *user_data) {
   auto *sctx = static_cast<ScratchCtx *>(user_data);
   uint32_t ready = static_cast<uint32_t>(
       __atomic_load_n(sctx->scratch_ready_ptr, __ATOMIC_ACQUIRE));
@@ -150,14 +151,14 @@ void QueueBase::scratch_handler(Event &, void *user_data) {
 
   uint32_t next_seq = done + 1;
   if (next_seq > ready)
-    return;
+    return true;
 
   // Fetch the scratch size and parameters the packet is requesting.
   ScratchRequest req;
   {
     detail::LockGuard guard(sctx->mtx);
     if (sctx->requests.empty())
-      return;
+      return true;
     req = sctx->requests.front();
     sctx->requests.pop_front();
   }
@@ -254,7 +255,7 @@ void QueueBase::scratch_handler(Event &, void *user_data) {
           static_cast<uint16_t>(QueueBase::MAX_SCRATCH_IB_DWORDS - 2));
       __atomic_store_n(&sctx->error, ENOMEM, __ATOMIC_RELAXED);
       __atomic_store_n(sctx->scratch_done_ptr, next_seq, __ATOMIC_RELEASE);
-      return;
+      return true;
     }
   }
 
@@ -276,6 +277,7 @@ void QueueBase::scratch_handler(Event &, void *user_data) {
 
   // We are done, fire the signal to unblock the WAIT_REG_MEM stalling the CP.
   __atomic_store_n(sctx->scratch_done_ptr, next_seq, __ATOMIC_RELEASE);
+  return true;
 }
 
 // Create a queue to communicate with the device's command processor. Each queue
@@ -441,8 +443,8 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
     q.err_watch_ctx = KFD_TRY(detail::Box<QueueErrorCtx>::create(
         QueueErrorCtx{reinterpret_cast<uint64_t *>(&q.ctl()->err_payload), q.id,
                       dev.gpu_id()}));
-    KFD_CHECK(ctx.watch_event(*q.err_event, queue_error_handler,
-                              q.err_watch_ctx.get()));
+    KFD_CHECK(ctx.register_handler(*q.err_event, queue_error_handler,
+                                   q.err_watch_ctx.get()));
   }
 
   if (is_compute) {
@@ -455,7 +457,7 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
     sctx->scratch_done_ptr = &ctl->scratch_done;
     sctx->scratch_ready_ptr = &ctl->scratch_ready;
     sctx->ib_buf = reinterpret_cast<uint32_t *>(ctl->indirect);
-    KFD_CHECK(ctx.watch_event(*q.scratch_event, scratch_handler, sctx));
+    KFD_CHECK(ctx.register_handler(*q.scratch_event, scratch_handler, sctx));
   }
 
   return q;
@@ -476,9 +478,9 @@ QueueBase::~QueueBase() {
     return;
 
   if (err_event)
-    KFD_ASSERT(ctx->unwatch_event(*err_event));
+    KFD_ASSERT(ctx->unregister_handler(*err_event));
   if (scratch_event)
-    KFD_ASSERT(ctx->unwatch_event(*scratch_event));
+    KFD_ASSERT(ctx->unregister_handler(*scratch_event));
 
   // Destroy the queue before releasing scratch. DESTROY_QUEUE preempts any
   // in-flight waves, so the scratch region is no longer referenced by the GPU
@@ -514,9 +516,9 @@ QueueBase &QueueBase::operator=(QueueBase &&other) {
 
   if (ctx) {
     if (err_event)
-      KFD_ASSERT(ctx->unwatch_event(*err_event));
+      KFD_ASSERT(ctx->unregister_handler(*err_event));
     if (scratch_event)
-      KFD_ASSERT(ctx->unwatch_event(*scratch_event));
+      KFD_ASSERT(ctx->unregister_handler(*scratch_event));
     ioctl::kfd::destroy_queue_args dq{.queue_id = id};
     KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_QUEUE>(ctx->kfd_fd(), dq));
     if (scratch_watch_ctx && scratch_watch_ctx->scratch_va) {

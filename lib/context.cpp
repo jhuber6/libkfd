@@ -100,45 +100,69 @@ void default_fault_handler(const FaultInfo &f, void *) {
 
 } // namespace
 
-struct FaultWatcher {
-  FaultWatcher(Event mem, Event hw, Event wake)
-      : mem_event(std::move(mem)), hw_event(std::move(hw)),
-        wake_event(std::move(wake)) {}
+// Shared interface for the runtime watcher threads for signals and exceptions.
+struct Watcher {
+  explicit Watcher(Event wake) : wake_event(std::move(wake)) {}
 
-  ~FaultWatcher() {
-    if (started) {
-      __atomic_store_n(&exit_flag, 1, __ATOMIC_RELEASE);
-      KFD_ASSERT(wake_event.signal());
-      ::pthread_join(thread, nullptr);
-    }
+  Watcher(const Watcher &) = delete;
+  Watcher &operator=(const Watcher &) = delete;
+
+  ~Watcher() {
+    if (!started)
+      return;
+    __atomic_store_n(&exit_flag, 1, __ATOMIC_RELEASE);
+    KFD_ASSERT(wake_event.signal());
+    ::pthread_join(thread, nullptr);
   }
 
-  struct WatchEntry {
-    Event *event;
-    WatchCallback callback;
-    void *user_data;
-    uint32_t event_id;
-  };
+  bool should_exit() const {
+    return __atomic_load_n(&exit_flag, __ATOMIC_ACQUIRE);
+  }
 
-  // A one-shot host callback fired when a signal's fence reaches its target.
-  struct CompletionEntry {
+  std::expected<void, Error> start(void *(*entry)(void *)) {
+    int err = ::pthread_create(&thread, nullptr, entry, this);
+    if (err != 0)
+      return kfd::unexpected(err, "failed to create watcher thread");
+    started = true;
+    return {};
+  }
+
+  Event wake_event;
+  uint32_t exit_flag = 0;
+  pthread_t thread = {};
+  bool started = false;
+  Mutex mtx; // Guards derived-class state.
+};
+
+// An asynchronous watcher thread that resolves actions to be run on signal
+// copmletion.
+struct SignalWatcher : Watcher {
+  using Watcher::Watcher;
+
+  struct Entry {
+    uint32_t event_id;
     uint64_t *fence;
     Condition cond;
     uint64_t value;
     SignalHandler callback;
     void *user_data;
-    uint32_t event_id;
+    const void *key;
+    uint64_t token;
+    uint64_t age;
   };
+
+  SmallVector<Entry, 8> entries;
+  uint64_t next_token = 1;
+};
+
+// An asynchronous watcher thread that triggers on exception events.
+struct ExceptionWatcher : Watcher {
+  ExceptionWatcher(Event mem, Event hw, Event wake)
+      : Watcher(std::move(wake)), mem_event(std::move(mem)),
+        hw_event(std::move(hw)) {}
 
   Event mem_event;
   Event hw_event;
-  Event wake_event;
-  uint32_t exit_flag = 0;
-  pthread_t thread = {};
-  bool started = false;
-  Mutex watch_mtx;
-  SmallVector<WatchEntry, 8> watches;
-  SmallVector<CompletionEntry, 8> completions;
   FaultHandler fault_handler = default_fault_handler;
   void *fault_user_data = nullptr;
 };
@@ -189,14 +213,14 @@ FaultInfo make_hw_exception(const ioctl::kfd::event_data &e) {
   return info;
 }
 
-void dispatch_faults(FaultWatcher *w, const ioctl::kfd::event_data &mem,
+void dispatch_faults(ExceptionWatcher *w, const ioctl::kfd::event_data &mem,
                      const ioctl::kfd::event_data &hw) {
   if (!mem.memory_exception_data.gpu_id && !hw.hw_exception_data.gpu_id)
     return;
   FaultHandler handler;
   void *user_data;
   {
-    LockGuard guard(w->watch_mtx);
+    LockGuard guard(w->mtx);
     handler = w->fault_handler;
     user_data = w->fault_user_data;
   }
@@ -206,40 +230,33 @@ void dispatch_faults(FaultWatcher *w, const ioctl::kfd::event_data &mem,
     handler(make_hw_exception(hw), user_data);
 }
 
-void *fault_watcher_entry(void *arg) {
-  auto *w = static_cast<FaultWatcher *>(arg);
+void *signal_watcher_entry(void *arg) {
+  auto *w = static_cast<SignalWatcher *>(arg);
 
   // We cannot use the raw Event * interface because the user could move the
-  // events and the independent watcher thread would not be updated.
+  // events and the independent watcher thread would not be updated. We need to
+  // track the age of the event to avoid re-triggering on stale events.
   SmallVector<ioctl::kfd::event_data, 16> eds;
-  while (!__atomic_load_n(&w->exit_flag, __ATOMIC_ACQUIRE)) {
+  SmallVector<uint64_t, 16> tokens;
+  while (!w->should_exit()) {
     eds.clear();
-
-    ioctl::kfd::event_data mem_ed{};
-    mem_ed.event_id = w->mem_event.event_id();
-    KFD_ASSERT(eds.push_back(mem_ed));
-
-    ioctl::kfd::event_data hw_ed{};
-    hw_ed.event_id = w->hw_event.event_id();
-    KFD_ASSERT(eds.push_back(hw_ed));
-
-    {
-      LockGuard guard(w->watch_mtx);
-      for (auto &we : w->watches) {
-        ioctl::kfd::event_data ed{};
-        ed.event_id = we.event_id;
-        KFD_ASSERT(eds.push_back(ed));
-      }
-      for (auto &c : w->completions) {
-        ioctl::kfd::event_data ed{};
-        ed.event_id = c.event_id;
-        KFD_ASSERT(eds.push_back(ed));
-      }
-    }
+    tokens.clear();
 
     ioctl::kfd::event_data wake_ed{};
     wake_ed.event_id = w->wake_event.event_id();
     KFD_ASSERT(eds.push_back(wake_ed));
+    KFD_ASSERT(tokens.push_back(0));
+
+    {
+      LockGuard guard(w->mtx);
+      for (auto &e : w->entries) {
+        ioctl::kfd::event_data ed{};
+        ed.event_id = e.event_id;
+        ed.signal_event_data.last_event_age = e.age;
+        KFD_ASSERT(eds.push_back(ed));
+        KFD_ASSERT(tokens.push_back(e.token));
+      }
+    }
 
     ioctl::kfd::wait_events_args wait{
         .events_ptr = reinterpret_cast<uintptr_t>(eds.data()),
@@ -247,108 +264,134 @@ void *fault_watcher_entry(void *arg) {
         .wait_for_all = 0,
         .timeout = UINT32_MAX,
     };
-    auto r = ioctl::call<ioctl::kfd::WAIT_EVENTS>(w->mem_event.kfd_fd(), wait);
+    auto r = ioctl::call<ioctl::kfd::WAIT_EVENTS>(w->wake_event.kfd_fd(), wait);
     if (!r || wait.wait_result != KFD_IOC_WAIT_RESULT_COMPLETE)
       continue;
 
-    if (__atomic_load_n(&w->exit_flag, __ATOMIC_ACQUIRE))
+    if (w->should_exit())
       break;
 
-    // Slots 0 and 1 are the watcher's own memory and hardware exception events.
-    dispatch_faults(w, eds[0], eds[1]);
-
-    SmallVector<FaultWatcher::CompletionEntry, 8> fired;
-    {
-      LockGuard guard(w->watch_mtx);
-      for (auto &we : w->watches)
-        we.callback(*we.event, we.user_data);
-      for (size_t i = 0; i < w->completions.size();) {
-        auto &c = w->completions[i];
-        if (condition_met(c.cond, __atomic_load_n(c.fence, __ATOMIC_ACQUIRE),
-                          c.value)) {
-          KFD_ASSERT(fired.push_back(c));
-          w->completions[i] = w->completions[w->completions.size() - 1];
-          w->completions.pop_back();
-        } else {
-          ++i;
+    // Dispatch under the lock so unregister_handler cannot remove an entry and
+    // free its user_data mid-callback. Callbacks must not re-enter the watcher;
+    // they return true to stay armed or false to be removed. An entry fires
+    // only when KFD reports a new age for it, so a wake for one event never
+    // re-fires another and a persistent fence level never re-fires without a
+    // new trigger.
+    LockGuard guard(w->mtx);
+    for (size_t k = 1; k < eds.size(); ++k) {
+      uint64_t new_age = eds[k].signal_event_data.last_event_age;
+      for (size_t i = 0; i < w->entries.size(); ++i) {
+        auto &e = w->entries[i];
+        if (e.token != tokens[k])
+          continue;
+        if (new_age != e.age) {
+          e.age = new_age;
+          bool met =
+              e.fence == nullptr ||
+              condition_met(e.cond, __atomic_load_n(e.fence, __ATOMIC_ACQUIRE),
+                            e.value);
+          if (met && !e.callback(e.user_data)) {
+            w->entries[i] = w->entries[w->entries.size() - 1];
+            w->entries.pop_back();
+          }
         }
+        break;
       }
     }
-    for (auto &c : fired)
-      c.callback(c.user_data);
   }
 
   return nullptr;
 }
 
-// Start the dedicated fault watcher background thread. This will sleep until an
-// abnormal event from the process or a queue wakes it and handles it.
-std::expected<Box<FaultWatcher>, Error> start_fault_watcher(Context &ctx) {
-  auto mem_ev = KFD_TRY(Event::create(ctx, EventType::MEMORY));
-  auto hw_ev = KFD_TRY(Event::create(ctx, EventType::HW_EXCEPTION));
-  auto wake_ev = KFD_TRY(Event::create(ctx, EventType::SIGNAL));
+void *exception_watcher_entry(void *arg) {
+  auto *w = static_cast<ExceptionWatcher *>(arg);
 
-  auto result = Box<FaultWatcher>::create(std::move(mem_ev), std::move(hw_ev),
-                                          std::move(wake_ev));
-  if (!result)
-    return kfd::unexpected(result.error());
-  auto watcher = std::move(*result);
+  ioctl::kfd::event_data eds[3];
+  while (!w->should_exit()) {
+    eds[0] = {};
+    eds[0].event_id = w->wake_event.event_id();
+    eds[1] = {};
+    eds[1].event_id = w->mem_event.event_id();
+    eds[2] = {};
+    eds[2].event_id = w->hw_event.event_id();
 
-  // Fork to an independent thread so the KFD process is shared.
-  int err = ::pthread_create(&watcher->thread, nullptr, fault_watcher_entry,
-                             watcher.get());
-  if (err != 0)
-    return kfd::unexpected(err, "failed to create fault watcher thread");
+    ioctl::kfd::wait_events_args wait{
+        .events_ptr = reinterpret_cast<uintptr_t>(eds),
+        .num_events = 3,
+        .wait_for_all = 0,
+        .timeout = UINT32_MAX,
+    };
+    auto r = ioctl::call<ioctl::kfd::WAIT_EVENTS>(w->wake_event.kfd_fd(), wait);
+    if (!r || wait.wait_result != KFD_IOC_WAIT_RESULT_COMPLETE)
+      continue;
 
-  watcher->started = true;
-  return watcher;
+    if (w->should_exit())
+      break;
+
+    dispatch_faults(w, eds[1], eds[2]);
+  }
+
+  return nullptr;
 }
 
-std::expected<void, Error> add_watch(FaultWatcher *watcher, Event *event,
-                                     WatchCallback cb, void *user_data) {
-  if (!watcher)
+std::expected<Box<SignalWatcher>, Error> make_signal_watcher(Context &ctx) {
+  auto wake = KFD_TRY(Event::create(ctx, EventType::SIGNAL));
+  auto box = Box<SignalWatcher>::create(std::move(wake));
+  if (!box)
+    return kfd::unexpected(box.error());
+  KFD_CHECK((*box)->start(signal_watcher_entry));
+  return std::move(*box);
+}
+
+std::expected<Box<ExceptionWatcher>, Error>
+make_exception_watcher(Context &ctx) {
+  auto mem = KFD_TRY(Event::create(ctx, EventType::MEMORY));
+  auto hw = KFD_TRY(Event::create(ctx, EventType::HW_EXCEPTION));
+  auto wake = KFD_TRY(Event::create(ctx, EventType::SIGNAL));
+  auto box = Box<ExceptionWatcher>::create(std::move(mem), std::move(hw),
+                                           std::move(wake));
+  if (!box)
+    return kfd::unexpected(box.error());
+  KFD_CHECK((*box)->start(exception_watcher_entry));
+  return std::move(*box);
+}
+
+std::expected<void, Error> add_entry(SignalWatcher *w, uint32_t event_id,
+                                     uint64_t *fence, Condition cond,
+                                     uint64_t value, SignalHandler cb,
+                                     void *user_data, const void *key) {
+  if (!w)
+    return kfd::unexpected(EINVAL, "register_handler requires a watcher");
+  {
+    LockGuard guard(w->mtx);
+    KFD_CHECK(w->entries.push_back({event_id, fence, cond, value, cb, user_data,
+                                    key, w->next_token++, /*age=*/1}));
+  }
+  return w->wake_event.signal();
+}
+
+std::expected<void, Error> remove_entry(SignalWatcher *w, const void *key) {
+  if (!w)
     return {};
-  LockGuard guard(watcher->watch_mtx);
-  KFD_CHECK(
-      watcher->watches.push_back({event, cb, user_data, event->event_id()}));
-  return watcher->wake_event.signal();
-}
-
-std::expected<void, Error> add_completion(FaultWatcher *watcher,
-                                          uint64_t *fence, Condition cond,
-                                          uint64_t value, uint32_t event_id,
-                                          SignalHandler cb, void *user_data) {
-  if (!watcher)
-    return kfd::unexpected(EINVAL, "register_handler requires a fault watcher");
-  LockGuard guard(watcher->watch_mtx);
-  KFD_CHECK(watcher->completions.push_back(
-      {fence, cond, value, cb, user_data, event_id}));
-  return watcher->wake_event.signal();
-}
-
-std::expected<void, Error> set_fault_handler(FaultWatcher *watcher,
-                                             FaultHandler cb, void *user_data) {
-  if (!watcher)
-    return kfd::unexpected(EINVAL,
-                           "set_fault_handler requires a fault watcher");
-  LockGuard guard(watcher->watch_mtx);
-  watcher->fault_handler = cb ? cb : default_fault_handler;
-  watcher->fault_user_data = cb ? user_data : nullptr;
-  return {};
-}
-
-std::expected<void, Error> remove_watch(FaultWatcher *watcher, Event *event) {
-  if (!watcher)
-    return {};
-  LockGuard guard(watcher->watch_mtx);
-  for (size_t i = 0; i < watcher->watches.size(); ++i) {
-    if (watcher->watches[i].event == event) {
-      watcher->watches[i] = watcher->watches[watcher->watches.size() - 1];
-      watcher->watches.pop_back();
+  LockGuard guard(w->mtx);
+  for (size_t i = 0; i < w->entries.size(); ++i) {
+    if (w->entries[i].key == key) {
+      w->entries[i] = w->entries[w->entries.size() - 1];
+      w->entries.pop_back();
       break;
     }
   }
-  return watcher->wake_event.signal();
+  return w->wake_event.signal();
+}
+
+std::expected<void, Error> set_fault_handler(ExceptionWatcher *watcher,
+                                             FaultHandler cb, void *user_data) {
+  if (!watcher)
+    return kfd::unexpected(EINVAL, "set_fault_handler requires a watcher");
+  LockGuard guard(watcher->mtx);
+  watcher->fault_handler = cb ? cb : default_fault_handler;
+  watcher->fault_user_data = cb ? user_data : nullptr;
+  return {};
 }
 
 void free_signal_page(int kfd_fd, SmallVector<Device, 4> &devs,
@@ -473,7 +516,8 @@ std::expected<Context, Error> Context::create() {
     }
   }
 
-  ctx.fault_watcher = KFD_TRY(start_fault_watcher(ctx));
+  ctx.signal_watcher = KFD_TRY(make_signal_watcher(ctx));
+  ctx.exception_watcher = KFD_TRY(make_exception_watcher(ctx));
 
   return ctx;
 }
@@ -487,7 +531,8 @@ std::expected<Device *, Error> Context::device(size_t i) {
 }
 
 Context::~Context() {
-  fault_watcher = {};
+  signal_watcher = {};
+  exception_watcher = {};
   nodes.clear();
   if (fd >= 0)
     ::close(fd);
@@ -496,14 +541,16 @@ Context::~Context() {
 Context::Context(Context &&other)
     : fd(std::exchange(other.fd, -1)), xnack(other.xnack),
       nodes(std::move(other.nodes)),
-      fault_watcher(std::move(other.fault_watcher)) {
+      signal_watcher(std::move(other.signal_watcher)),
+      exception_watcher(std::move(other.exception_watcher)) {
   for (auto &dev : nodes)
     dev.ctx = this;
 }
 
 Context &Context::operator=(Context &&other) {
   if (this != &other) {
-    fault_watcher = {};
+    signal_watcher = {};
+    exception_watcher = {};
     nodes.clear();
     if (fd >= 0)
       ::close(fd);
@@ -511,7 +558,8 @@ Context &Context::operator=(Context &&other) {
     fd = std::exchange(other.fd, -1);
     xnack = other.xnack;
     nodes = std::move(other.nodes);
-    fault_watcher = std::move(other.fault_watcher);
+    signal_watcher = std::move(other.signal_watcher);
+    exception_watcher = std::move(other.exception_watcher);
 
     for (auto &dev : nodes)
       dev.ctx = this;
@@ -539,25 +587,26 @@ std::expected<uint64_t *, Error> Context::fence_slot(uint32_t id) {
   return &__atomic_load_n(&fence_page, __ATOMIC_ACQUIRE)[id];
 }
 
-std::expected<void, Error> Context::watch_event(Event &event, WatchCallback cb,
-                                                void *user_data) {
-  return add_watch(fault_watcher.get(), &event, cb, user_data);
+std::expected<void, Error>
+Context::register_handler(Event &event, SignalHandler cb, void *user_data) {
+  return add_entry(signal_watcher.get(), event.event_id(), nullptr,
+                   Condition::EQ, 0, cb, user_data, /*key=*/&event);
 }
 
-std::expected<void, Error> Context::unwatch_event(Event &event) {
-  return remove_watch(fault_watcher.get(), &event);
+std::expected<void, Error> Context::unregister_handler(Event &event) {
+  return remove_entry(signal_watcher.get(), /*key=*/&event);
 }
 
 std::expected<void, Error>
 Context::register_handler(Signal &sig, Condition cond, uint64_t value,
                           SignalHandler cb, void *user_data) {
-  return add_completion(fault_watcher.get(), sig.fence_addr(), cond, value,
-                        sig.event_id(), cb, user_data);
+  return add_entry(signal_watcher.get(), sig.event_id(), sig.fence_addr(), cond,
+                   value, cb, user_data, /*key=*/nullptr);
 }
 
 std::expected<void, Error> Context::register_handler(FaultHandler cb,
                                                      void *user_data) {
-  return set_fault_handler(fault_watcher.get(), cb, user_data);
+  return set_fault_handler(exception_watcher.get(), cb, user_data);
 }
 
 } // namespace kfd

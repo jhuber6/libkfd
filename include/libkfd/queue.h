@@ -101,8 +101,8 @@ private:
     return static_cast<QueueControl *>(control.data());
   }
   std::expected<void, Error> wait_for_room(uint32_t dwords);
-  static void queue_error_handler(Event &event, void *user_data);
-  static void scratch_handler(Event &event, void *user_data);
+  static bool queue_error_handler(void *user_data);
+  static bool scratch_handler(void *user_data);
 
   QueueType type{};
   Context *ctx = nullptr;

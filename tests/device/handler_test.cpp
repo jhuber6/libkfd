@@ -19,26 +19,21 @@ int wait_for(std::atomic<int> &counter, int target) {
   return counter.load(std::memory_order_acquire);
 }
 
-void bump(void *data) {
+bool bump(void *data) {
   static_cast<std::atomic<int> *>(data)->fetch_add(1,
                                                    std::memory_order_acq_rel);
+  return false;
 }
 
 struct Rearm {
-  kfd::Context *ctx;
-  kfd::Signal *sig;
   std::atomic<int> count{0};
-  uint64_t target;
+  int limit;
 };
 
-void on_complete(void *data) {
+bool on_complete(void *data) {
   auto *r = static_cast<Rearm *>(data);
-  r->count.fetch_add(1, std::memory_order_acq_rel);
-  if (r->target > 0) {
-    r->target -= 1;
-    (void)r->ctx->register_handler(*r->sig, kfd::Condition::EQ, r->target,
-                                   on_complete, r);
-  }
+  int fired = r->count.fetch_add(1, std::memory_order_acq_rel) + 1;
+  return fired < r->limit;
 }
 
 } // namespace
@@ -72,7 +67,7 @@ TEST_CASE("Handler - one-shot fires once and is removed", "[device][handler]") {
   }
 }
 
-TEST_CASE("Handler - callback re-registers itself to re-arm",
+TEST_CASE("Handler - callback stays armed by returning true",
           "[device][handler]") {
   auto &ctx = require_ctx();
   for (size_t di = 0; di < ctx.num_devices(); ++di) {
@@ -82,20 +77,26 @@ TEST_CASE("Handler - callback re-registers itself to re-arm",
       auto queue = kfd::ComputeQueue::create(gpu);
       REQUIRE_RESULT(queue);
 
-      // Decrement once per signal.
-      constexpr int N = 4;
-      auto sig = kfd::Signal::create(ctx, N);
+      auto sig = kfd::Signal::create(ctx);
       REQUIRE_RESULT(sig);
 
-      Rearm r{.ctx = &ctx, .sig = &*sig, .target = N - 1};
-      REQUIRE_RESULT(ctx.register_handler(*sig, kfd::Condition::EQ, r.target,
-                                          on_complete, &r));
+      constexpr int N = 4;
+      Rearm r{.limit = N};
+      REQUIRE_RESULT(
+          ctx.register_handler(*sig, kfd::Condition::EQ, 0, on_complete, &r));
 
       for (int i = 0; i < N; ++i) {
         INFO("signal " << i);
         REQUIRE_RESULT(queue->signal(*sig));
         CHECK(wait_for(r.count, i + 1) == i + 1);
+        REQUIRE_RESULT(sig->reset());
       }
+      CHECK(r.count.load() == N);
+
+      REQUIRE_RESULT(queue->signal(*sig));
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
       CHECK(r.count.load() == N);
     }
   }

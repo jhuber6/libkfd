@@ -20,10 +20,8 @@ namespace kfd {
 
 class Event;
 class Signal;
-struct FaultWatcher;
-
-// Callback invoked by the fault watcher when a watched event fires.
-using WatchCallback = void (*)(Event &event, void *user_data);
+struct SignalWatcher;
+struct ExceptionWatcher;
 
 struct MemoryFaultInfo {
   // Bitmask of reasons a memory access faulted.
@@ -57,11 +55,11 @@ struct FaultInfo {
   };
 };
 
-// Invoked once by the watcher thread on hardware exception.
+// Invoked by the exception watcher on a GPU memory fault or hardware exception.
 using FaultHandler = void (*)(const FaultInfo &fault, void *user_data);
 
-// Invoked once by the watcher thread when a signal reaches its target value.
-using SignalHandler = void (*)(void *user_data);
+// Invoked by the signal watcher on interrupt. A return value of true re-arms.
+using SignalHandler = bool (*)(void *user_data);
 
 struct VersionInfo {
   uint32_t major;
@@ -95,7 +93,7 @@ public:
   std::span<Device> devices() { return nodes; }
   std::expected<Device *, Error> device(size_t i);
 
-  // Register a custom handler with the context's watcher thread.
+  // Register a handler with the context's watcher threads.
   std::expected<void, Error> register_handler(Signal &sig, Condition cond,
                                               uint64_t value, SignalHandler cb,
                                               void *user_data);
@@ -109,15 +107,16 @@ private:
   std::expected<uint64_t *, Error> event_slot(uint32_t id);
   std::expected<uint64_t *, Error> fence_slot(uint32_t id);
 
-  std::expected<void, Error> watch_event(Event &event, WatchCallback cb,
-                                         void *user_data = nullptr);
-  std::expected<void, Error> unwatch_event(Event &event);
+  std::expected<void, Error> register_handler(Event &event, SignalHandler cb,
+                                              void *user_data = nullptr);
+  std::expected<void, Error> unregister_handler(Event &event);
 
   explicit Context(int fd, bool xnack, detail::SmallVector<Device, 4> devices);
   int fd;
   bool xnack = false;
   detail::SmallVector<Device, 4> nodes;
-  detail::Box<FaultWatcher> fault_watcher;
+  detail::Box<SignalWatcher> signal_watcher;
+  detail::Box<ExceptionWatcher> exception_watcher;
 };
 
 } // namespace kfd
