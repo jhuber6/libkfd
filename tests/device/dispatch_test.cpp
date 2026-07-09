@@ -197,6 +197,98 @@ TEST_CASE("Dispatch - fill_wg_ids across multiple workgroups",
   }
 }
 
+TEST_CASE("Dispatch - static grid split reconstructs a full launch",
+          "[device][dispatch]") {
+  auto &ctx = require_ctx();
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = require_gpu(ctx, di);
+      auto fix = make_device_fixture(gpu, dispatch_kernels);
+      if (!fix && fix.error().code == ENOEXEC)
+        SKIP(kfd::strerror(fix));
+      REQUIRE_RESULT(fix);
+
+      auto kernel = fix->exe.kernel("grid_memset.kd");
+      REQUIRE_RESULT(kernel);
+
+      constexpr uint32_t NUM_WG = 256;
+      constexpr uint32_t THREADS = 64;
+      constexpr uint32_t CHUNKS = 8;
+      constexpr uint32_t PER = NUM_WG / CHUNKS; // work-groups per chunk
+      constexpr uint32_t N = NUM_WG * THREADS;
+      static_assert(NUM_WG % CHUNKS == 0);
+
+      auto out = kfd::test::alloc_host_buffer(
+          *fix->gpu, kfd::detail::align_up(N * sizeof(unsigned),
+                                           kfd::detail::page_size()));
+      auto *vals = static_cast<unsigned *>(out.data());
+
+      struct Args {
+        unsigned *out;
+        unsigned tag;
+      };
+      kfd::DispatchConfig full{.grid = {.x = NUM_WG}, .block = {.x = THREADS}};
+
+      // Sanity: an unmodified full-grid dispatch still stamps everything.
+      {
+        std::memset(vals, 0, N * sizeof(unsigned));
+        auto ka = kernel->alloc();
+        REQUIRE_RESULT(ka);
+        Args args{.out = vals, .tag = 0xABCDu};
+        kernel->fill(*ka, args, full);
+        auto sig = kfd::Signal::create(ctx);
+        REQUIRE_RESULT(sig);
+        REQUIRE_RESULT(fix->compute.dispatch(*kernel, full, *ka));
+        REQUIRE_RESULT(fix->compute.signal(*sig));
+        REQUIRE_RESULT(
+            sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+        bool ok = true;
+        for (uint32_t i = 0; i < N; ++i)
+          ok &= vals[i] == 0xABCDu;
+        CHECK(ok);
+      }
+
+      // Split the single logical grid into CHUNKS disjoint sub-dispatches,
+      // each stamping a distinct tag over its own work-group range.
+      std::memset(vals, 0, N * sizeof(unsigned));
+      std::vector<kfd::Buffer> kernargs;
+      for (uint32_t c = 0; c < CHUNKS; ++c) {
+        auto ka = kernel->alloc();
+        REQUIRE_RESULT(ka);
+        Args args{.out = vals, .tag = c + 1};
+        kernel->fill(*ka, args, full); // full grid seen by the shader
+        kernargs.push_back(std::move(*ka));
+
+        kfd::DispatchConfig sub = full;
+        sub.grid_start = {.x = c * PER};
+        sub.grid_count = {.x = PER};
+        REQUIRE_RESULT(fix->compute.dispatch(*kernel, sub, kernargs.back()));
+      }
+
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
+      REQUIRE_RESULT(fix->compute.signal(*sig));
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+
+      // Every slot must carry its own chunk's tag. A dropped COMPUTE_START
+      // offset would let the last (largest) chunk overwrite all slots.
+      unsigned mismatches = 0;
+      for (uint32_t i = 0; i < N; ++i) {
+        unsigned expected = i / THREADS / PER + 1;
+        if (vals[i] != expected) {
+          if (mismatches < 8) {
+            INFO("slot " << i << " (block " << i / THREADS << ")");
+            CHECK(vals[i] == expected);
+          }
+          ++mismatches;
+        }
+      }
+      CHECK(mismatches == 0);
+    }
+  }
+}
+
 namespace {
 
 void run_check_dims(DeviceFixture &fix, kfd::Dim3 grid, kfd::Dim3 block) {

@@ -40,6 +40,12 @@ __gpu_kernel void fill_wg_ids(unsigned *out) {
     out[__gpu_block_id_x()] = __gpu_block_id_x();
 }
 
+__gpu_kernel void grid_memset(unsigned *out, unsigned tag) {
+  unsigned gid =
+      __gpu_thread_id_x() + __gpu_block_id_x() * __gpu_num_threads_x();
+  out[gid] = tag;
+}
+
 __gpu_kernel void check_dims(unsigned *out) {
   if (__gpu_thread_id_x() != 0 || __gpu_thread_id_y() != 0 ||
       __gpu_thread_id_z() != 0)

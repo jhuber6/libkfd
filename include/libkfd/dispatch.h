@@ -25,6 +25,8 @@ struct DispatchConfig {
   Dim3 block;
   uint32_t dynamic_lds = 0;
   uint32_t private_segment_size = 0;
+  Dim3 grid_start = {0, 0, 0};
+  Dim3 grid_count = {0, 0, 0};
 };
 
 } // namespace kfd

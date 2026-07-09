@@ -620,8 +620,8 @@ enum AcquireMemFlags : uint32_t {
   ACQ_L2_WB = 1u << 4,  // L2 / GL2 writeback
   ACQ_META = 1u << 5,   // Metadata (GL metadata WB + INV)
 
-  ACQ_ALL =
-      ACQ_KCACHE | ACQ_ICACHE | ACQ_VCACHE | ACQ_L2_INV | ACQ_L2_WB | ACQ_META,
+  ACQ_ALL = ACQ_KCACHE | ACQ_ICACHE | ACQ_VCACHE | ACQ_L2_INV | ACQ_L2_WB |
+      ACQ_META,
 };
 
 inline constexpr AcquireMemFlags operator|(AcquireMemFlags a,
@@ -941,8 +941,7 @@ inline uint32_t set_scratch_base(uint32_t *out, uint32_t gfx_version,
 // Compute the DISPATCH_DIRECT initiator bits from a kernel descriptor.
 inline uint32_t dispatch_initiator(const abi::KernelDescriptor &kd,
                                    uint32_t gfx_version) {
-  uint32_t init =
-      regs::DISPATCH_COMPUTE_SHADER_EN | regs::DISPATCH_FORCE_START_AT_000;
+  uint32_t init = regs::DISPATCH_COMPUTE_SHADER_EN;
   if ((kd.kernel_code_properties & abi::ENABLE_WAVEFRONT_SIZE32) &&
       gfx_version >= abi::GFX_VERSION_GFX10_1)
     init |= regs::DISPATCH_CS_W32_EN;
@@ -971,13 +970,20 @@ inline uint32_t build_dispatch_setup(
     const void *kernarg_addr = nullptr, const void *dispatch_pkt_addr = nullptr,
     const void *scratch_base = nullptr, uint32_t tmpring_size = 0,
     uint32_t dynamic_lds = 0, uint32_t private_segment_size = 0,
-    bool cooperative = false) {
+    bool cooperative = false, Dim3 grid_start = {0, 0, 0}) {
   uint32_t written = 0;
 
+  // COMPUTE_START_X/Y/Z set the work-group ID origin. They are honored only
+  // when the DISPATCH_DIRECT initiator does not use FORCE_START_AT_000.
   const uint32_t dims[] = {
-      0,       0,       0,       // COMPUTE_START_X/Y/Z
-      block.x, block.y, block.z, // COMPUTE_NUM_THREAD_X/Y/Z
-      0,       0,                // PIPELINESTAT_ENABLE, PERFCOUNT_ENABLE
+      grid_start.x,
+      grid_start.y,
+      grid_start.z, // COMPUTE_START_X/Y/Z
+      block.x,
+      block.y,
+      block.z, // COMPUTE_NUM_THREAD_X/Y/Z
+      0,
+      0, // PIPELINESTAT, PERFCOUNT
   };
   written += set_sh_reg(out + written, regs::COMPUTE_START_X, dims, 8);
 

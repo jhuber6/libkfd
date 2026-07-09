@@ -755,12 +755,23 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
   uint32_t buf[pm4::ACQUIRE_MEM_DWORDS + pm4::MAX_DISPATCH_DWORDS];
   uint32_t n = pm4::acquire_mem(buf, base.dev->gfx_version(), pm4::ACQ_KCACHE);
 
+  // Resolve the launch sub-range for manual launch grid partitioning. A
+  // non-zero origin covers [start, start + count) and reports absolute
+  // work-group IDs.
+  auto launch_count = [](uint32_t count, uint32_t full, uint32_t start) {
+    return count ? count : (full > start ? full - start : 0);
+  };
+  Dim3 start = cfg.grid_start;
+  Dim3 count = {launch_count(cfg.grid_count.x, cfg.grid.x, start.x),
+                launch_count(cfg.grid_count.y, cfg.grid.y, start.y),
+                launch_count(cfg.grid_count.z, cfg.grid.z, start.z)};
+
   void *va = __atomic_load_n(&sctx->scratch_va, __ATOMIC_RELAXED);
   uint32_t tmpring = __atomic_load_n(&sctx->scratch_tmpring, __ATOMIC_RELAXED);
   n += pm4::build_dispatch_setup(
       buf + n, base.dev->gfx_version(), kd, kernel.address(), cfg.grid,
       cfg.block, kernarg.data(), dispatch_pkt_addr, va, tmpring,
-      cfg.dynamic_lds, private_segment_size, cooperative);
+      cfg.dynamic_lds, private_segment_size, cooperative, start);
 
   // Here we are either waiting for a scratch allocation or stalled behind
   // another kernel that is. We already encoded the scratch base so we use an
@@ -786,7 +797,7 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
 
   // Push the final dispatch with the full configuration.
   n += pm4::dispatch_direct(
-      buf + n, cfg.grid.x, cfg.grid.y, cfg.grid.z,
+      buf + n, start.x + count.x, start.y + count.y, start.z + count.z,
       pm4::dispatch_initiator(kd, base.dev->gfx_version()));
 
   return base.submit_impl(buf, n);
