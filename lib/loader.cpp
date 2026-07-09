@@ -32,12 +32,15 @@ std::expected<Buffer, Error> Kernel::alloc() const {
 
 void Kernel::fill(Buffer &buf, std::span<const std::byte> explicit_args,
                   const DispatchConfig &cfg) const {
+  auto *base = static_cast<std::byte *>(buf.data());
   size_t total = abi::kernarg_alloc_size(kd->kernarg_size);
-  std::memset(buf.data(), 0, total);
-  if (!explicit_args.empty())
-    std::memcpy(buf.data(), explicit_args.data(),
-                detail::min(explicit_args.size(), total));
-  abi::fill_implicit_args(buf.data(), explicit_args.size(), *kd, cfg);
+  size_t explicit_size = detail::min(explicit_args.size(), total);
+  if (explicit_size)
+    std::memcpy(base, explicit_args.data(), explicit_size);
+  if (kd->kernarg_size > explicit_size)
+    std::memset(base + explicit_size, 0, kd->kernarg_size - explicit_size);
+
+  abi::fill_implicit_args(base, explicit_args.size(), *kd, cfg);
 }
 
 std::expected<Executable, Error>

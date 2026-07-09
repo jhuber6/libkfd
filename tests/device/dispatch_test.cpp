@@ -260,8 +260,8 @@ TEST_CASE("Dispatch - static grid split reconstructs a full launch",
         kernargs.push_back(std::move(*ka));
 
         kfd::DispatchConfig sub = full;
-        sub.grid_start = {.x = c * PER};
-        sub.grid_count = {.x = PER};
+        sub.grid_start = {.x = c * PER, .y = 0, .z = 0};
+        sub.grid_count = {.x = PER, .y = 0, .z = 0};
         REQUIRE_RESULT(fix->compute.dispatch(*kernel, sub, kernargs.back()));
       }
 

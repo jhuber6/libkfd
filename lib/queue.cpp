@@ -554,11 +554,9 @@ std::expected<void, Error> QueueBase::wait_for_room(uint32_t dwords) {
   volatile uint32_t *rp_addr =
       reinterpret_cast<volatile uint32_t *>(&ctl()->read_ptr);
   constexpr uint64_t TIMEOUT_US = 5'000'000;
-  struct timespec now;
-  ::clock_gettime(CLOCK_MONOTONIC, &now);
-  uint64_t deadline_ns = static_cast<uint64_t>(now.tv_sec) * 1'000'000'000 +
-                         static_cast<uint64_t>(now.tv_nsec) +
-                         TIMEOUT_US * 1'000;
+
+  bool armed = false;
+  uint64_t deadline_ns = 0;
   for (;;) {
     uint32_t rp = __atomic_load_n(rp_addr, __ATOMIC_ACQUIRE);
     if (type == QueueType::SDMA)
@@ -566,13 +564,18 @@ std::expected<void, Error> QueueBase::wait_for_room(uint32_t dwords) {
     uint32_t in_flight = (pos + cap - rp) % cap;
     if (in_flight + dwords < cap)
       return {};
+    struct timespec now;
     ::clock_gettime(CLOCK_MONOTONIC, &now);
     uint64_t now_ns = static_cast<uint64_t>(now.tv_sec) * 1'000'000'000 +
                       static_cast<uint64_t>(now.tv_nsec);
-    if (now_ns >= deadline_ns)
+    if (!armed) {
+      deadline_ns = now_ns + TIMEOUT_US * 1'000;
+      armed = true;
+    } else if (now_ns >= deadline_ns) {
       return kfd::unexpected(
           ETIMEDOUT, "ring buffer stall waiting for %u dwords of wrap padding",
           dwords);
+    }
     detail::spin_hint();
   }
 }
