@@ -50,7 +50,7 @@ public:
   // Return the current value of the signal.
   uint64_t value() const { return __atomic_load_n(fence, __ATOMIC_RELAXED); }
 
-  // Clears any pending events and resets the signal value.
+  // Resets the signal value.
   std::expected<void, Error> reset(uint64_t value = 1);
 
   // Signal the underlying event to wake a pending wait.

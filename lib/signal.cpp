@@ -3,7 +3,6 @@
 // Signal creation internals, condition, and wait semantics. Signals spin until
 // their values satisfy their condition. The fast path performs active polling
 // before falling back to sleeping on the event. This is a blocking operation.
-// Note that the events are not explicitly cleared on the fast path.
 //
 //===----------------------------------------------------------------------===//
 
@@ -92,7 +91,6 @@ std::expected<Signal, Error> Signal::create(Context &ctx, uint64_t initial) {
 int Signal::kfd_fd() const { return event.kfd_fd(); }
 
 std::expected<void, Error> Signal::reset(uint64_t value) {
-  KFD_CHECK(event.reset());
   __atomic_store_n(fence, value, __ATOMIC_RELEASE);
   return {};
 }
