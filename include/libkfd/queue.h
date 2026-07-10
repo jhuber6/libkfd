@@ -325,7 +325,7 @@ private:
     n += pm4::release_mem(buf + n, gfx, eop_seq.data(),
                           static_cast<uint64_t>(seq));
     n += pm4::wait_reg_mem(buf + n, gfx, eop_seq.data(), Condition::GTE, seq);
-    n += pm4::atomic_mem(buf + n, pm4::ATOMIC_ADD_RTN_64, sig.fence_addr(),
+    n += pm4::atomic_mem(buf + n, pm4::ATOMIC_ADD_RTN_32, sig.fence_addr(),
                          int64_t(-1), 0, pm4::ATOMIC_SINGLE_PASS,
                          pm4::POLICY_BYPASS);
     n += pm4::release_mem(buf + n, gfx, sig.signal_addr(), sig.event_id(),
@@ -442,7 +442,7 @@ public:
     uint32_t n = 0;
     if (base.dev->gfx_version() >= abi::GFX_VERSION_GFX10_1)
       n += sdma::gcr_req(buf + n);
-    n += sdma::atomic_mem(buf + n, sdma::ATOMIC_ADD_64, sig.fence_addr(), -1);
+    n += sdma::atomic_mem(buf + n, sdma::ATOMIC_ADD_32, sig.fence_addr(), -1);
     n += sdma::fence(buf + n, base.dev->gfx_version(), sig.signal_addr(),
                      sig.event_id());
     n += sdma::trap(buf + n, sig.trigger_data());

@@ -35,7 +35,7 @@ inline void spin_hint() {
 #endif
 }
 
-inline void spin_wait(uint64_t *addr, uint64_t last_value,
+inline void spin_wait(uint32_t *addr, uint32_t last_value,
                       uint32_t timeout_cycles = 50'000) {
 #if __has_builtin(__builtin_ia32_monitorx)
   __builtin_ia32_monitorx(addr, 0, 0);

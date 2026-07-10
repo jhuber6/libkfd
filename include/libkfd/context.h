@@ -95,7 +95,7 @@ public:
 
   // Register a handler with the context's watcher threads.
   std::expected<void, Error> register_handler(Signal &sig, Condition cond,
-                                              uint64_t value, SignalHandler cb,
+                                              uint32_t value, SignalHandler cb,
                                               void *user_data);
   std::expected<void, Error> register_handler(FaultHandler cb, void *user_data);
 
@@ -105,7 +105,7 @@ private:
   friend class Signal;
 
   std::expected<uint64_t *, Error> event_slot(uint32_t id);
-  std::expected<uint64_t *, Error> fence_slot(uint32_t id);
+  std::expected<uint32_t *, Error> fence_slot(uint32_t id);
 
   std::expected<void, Error> register_handler(Event &event, SignalHandler cb,
                                               void *user_data = nullptr);

@@ -272,7 +272,7 @@ int main(int argc, const char **argv, const char **envp) {
 
   kfd::Signal doorbell = KFD_EXPECT(kfd::Signal::create(ctx, /*initial=*/0));
   rpc::Doorbell db{
-      .value = doorbell.fence_addr(),
+      .value = reinterpret_cast<uint64_t *>(doorbell.fence_addr()),
       .mailbox = static_cast<uint64_t *>(doorbell.signal_addr()),
       .event_id = doorbell.event_id(),
   };
@@ -334,7 +334,9 @@ int main(int argc, const char **argv, const char **envp) {
   launch_if_present(dev, exe, compute, "amdgcn.device.fini.kd");
 
   rpc_running.store(false, std::memory_order_release);
-  std::atomic_ref<uint64_t>(*doorbell.fence_addr()).store(1);
+  std::atomic_ref<uint64_t>(
+      *reinterpret_cast<uint64_t *>(doorbell.fence_addr()))
+      .store(1);
   KFD_EXPECT(doorbell.signal());
   rpc_thread.join();
 

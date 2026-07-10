@@ -18,7 +18,7 @@ namespace kfd {
 
 namespace {
 
-bool check_condition(uint64_t current, Condition cond, uint64_t value) {
+bool check_condition(uint32_t current, Condition cond, uint32_t value) {
   switch (cond) {
   case Condition::LT:
     return current < value;
@@ -43,7 +43,7 @@ uint64_t now_ns() {
          static_cast<uint64_t>(ts.tv_nsec);
 }
 
-int check_any(std::span<Signal *> signals, Condition cond, uint64_t value) {
+int check_any(std::span<Signal *> signals, Condition cond, uint32_t value) {
   for (size_t i = 0; i < signals.size(); ++i)
     if (check_condition(
             __atomic_load_n(signals[i]->fence_addr(), __ATOMIC_ACQUIRE), cond,
@@ -52,7 +52,7 @@ int check_any(std::span<Signal *> signals, Condition cond, uint64_t value) {
   return -1;
 }
 
-bool check_all(std::span<Signal *> signals, Condition cond, uint64_t value) {
+bool check_all(std::span<Signal *> signals, Condition cond, uint32_t value) {
   for (auto *sig : signals)
     if (!check_condition(__atomic_load_n(sig->fence_addr(), __ATOMIC_ACQUIRE),
                          cond, value))
@@ -80,7 +80,7 @@ uint64_t add_sat(uint64_t a, uint64_t b) {
 
 } // namespace
 
-std::expected<Signal, Error> Signal::create(Context &ctx, uint64_t initial) {
+std::expected<Signal, Error> Signal::create(Context &ctx, uint32_t initial) {
   auto ev = KFD_TRY(Event::create(ctx));
   auto slot = KFD_TRY(ctx.fence_slot(ev.slot_index()));
 
@@ -90,7 +90,7 @@ std::expected<Signal, Error> Signal::create(Context &ctx, uint64_t initial) {
 
 int Signal::kfd_fd() const { return event.kfd_fd(); }
 
-std::expected<void, Error> Signal::reset(uint64_t value) {
+std::expected<void, Error> Signal::reset(uint32_t value) {
   __atomic_store_n(fence, value, __ATOMIC_RELEASE);
   return {};
 }
@@ -107,14 +107,14 @@ Signal &Signal::operator=(Signal &&other) {
   return *this;
 }
 
-std::expected<void, Error> Signal::wait(Condition cond, uint64_t value,
+std::expected<void, Error> Signal::wait(Condition cond, uint32_t value,
                                         uint64_t timeout_ns, uint64_t spin_ns) {
   Signal *self = this;
   return wait_all({&self, 1}, cond, value, timeout_ns, spin_ns);
 }
 
 std::expected<void, Error> wait_all(std::span<Signal *> signals, Condition cond,
-                                    uint64_t value, uint64_t timeout_ns,
+                                    uint32_t value, uint64_t timeout_ns,
                                     uint64_t spin_ns) {
   if (signals.empty())
     return {};
@@ -151,7 +151,7 @@ std::expected<void, Error> wait_all(std::span<Signal *> signals, Condition cond,
 }
 
 std::expected<size_t, Error> wait_any(std::span<Signal *> signals,
-                                      Condition cond, uint64_t value,
+                                      Condition cond, uint32_t value,
                                       uint64_t timeout_ns, uint64_t spin_ns) {
   if (signals.empty())
     return kfd::unexpected(EINVAL, "wait_any called with no signals");
