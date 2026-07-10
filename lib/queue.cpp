@@ -413,17 +413,21 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
     args.ctl_stack_size = props.ctl_stack_size;
   }
 
-  // Queues are a contended resource, if we fail to get one just retry.
-  constexpr int QUEUE_CREATE_RETRIES = 20;
-  constexpr long QUEUE_RETRY_MS = 100;
+  // SDMA queues have limited slots and do not oversubscribe like compute queues
+  // do. If the process fails to get one with ENOMEM we retry a few times.
+  constexpr int QUEUE_CREATE_RETRIES = 40;
+  constexpr long QUEUE_BACKOFF_START_US = 250;
+  constexpr long QUEUE_BACKOFF_MAX_US = 50'000;
+  long backoff_us = QUEUE_BACKOFF_START_US;
   for (int attempt = 0;; ++attempt) {
     auto r = ioctl::call<ioctl::kfd::CREATE_QUEUE>(ctx.kfd_fd(), args);
     if (r)
       break;
     if (r.error().code != ENOMEM || attempt >= QUEUE_CREATE_RETRIES)
       return kfd::unexpected(r.error());
-    struct timespec ts = {.tv_sec = 0, .tv_nsec = QUEUE_RETRY_MS * 1'000'000L};
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = backoff_us * 1'000L};
     ::nanosleep(&ts, nullptr);
+    backoff_us = detail::min(backoff_us * 2, QUEUE_BACKOFF_MAX_US);
   }
 
   // Doorbells are MMIO mapped registers that signal the CP to consume packets.

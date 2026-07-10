@@ -209,6 +209,22 @@ public:
     return base.submit(buf, pm4::RELEASE_MEM_DWORDS);
   }
 
+  // Writes the value to the address on EOP flush, does not stall the CP unlike
+  // the signal interface, but requires manual lifetime management.
+  std::expected<void, Error> release_mem(uint64_t *addr, uint64_t value) {
+    uint32_t buf[pm4::RELEASE_MEM_DWORDS];
+    pm4::release_mem(buf, base.dev->gfx_version(), addr, value);
+    return base.submit(buf, pm4::RELEASE_MEM_DWORDS);
+  }
+
+  // Triggers the kfd event on the queue's EOP completion.
+  std::expected<void, Error> release_mem(Event &event) {
+    uint32_t buf[pm4::RELEASE_MEM_DWORDS];
+    pm4::release_mem(buf, base.dev->gfx_version(), event.signal_addr(),
+                     event.event_id(), event.trigger_data());
+    return base.submit(buf, pm4::RELEASE_MEM_DWORDS);
+  }
+
   std::expected<void, Error>
   acquire_mem(pm4::AcquireMemFlags flags = pm4::ACQ_ALL) {
     uint32_t buf[pm4::ACQUIRE_MEM_DWORDS];
