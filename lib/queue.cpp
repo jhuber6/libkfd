@@ -680,7 +680,8 @@ ComputeQueue::create(Device &dev, size_t ring_size, uint32_t target_xcc) {
 // the watcher thread to be handled in the background without stalling the user.
 std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
                                                   const DispatchConfig &cfg,
-                                                  const Buffer &kernarg) {
+                                                  const Buffer &kernarg,
+                                                  Signal *completion) {
   const abi::KernelDescriptor &kd = kernel.descriptor();
 
   if (cooperative) {
@@ -755,7 +756,8 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
   // Invalidate scalar caches (K-cache / GLK) so the shader reads fresh
   // kernarg data. RELEASE_MEM only flushes L2 and vector L1; the scalar L1
   // retains stale entries across dispatches to the same kernarg address.
-  uint32_t buf[pm4::ACQUIRE_MEM_DWORDS + pm4::MAX_DISPATCH_DWORDS];
+  uint32_t
+      buf[pm4::ACQUIRE_MEM_DWORDS + pm4::MAX_DISPATCH_DWORDS + SIGNAL_DWORDS];
   uint32_t n = pm4::acquire_mem(buf, base.dev->gfx_version(), pm4::ACQ_KCACHE);
 
   // Resolve the launch sub-range for manual launch grid partitioning. A
@@ -802,6 +804,10 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
   n += pm4::dispatch_direct(
       buf + n, start.x + count.x, start.y + count.y, start.z + count.z,
       pm4::dispatch_initiator(kd, base.dev->gfx_version()));
+
+  // If a completion signal is needed we append it under the queue lock.
+  if (completion)
+    n += signal(buf + n, *completion);
 
   return base.submit_impl(buf, n);
 }

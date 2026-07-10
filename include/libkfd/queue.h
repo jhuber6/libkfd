@@ -188,20 +188,7 @@ public:
   // has finished.
   std::expected<void, Error> signal(Signal &sig) {
     uint32_t buf[SIGNAL_DWORDS];
-    // We use a RELEASE_MEM packet with the sequence counter and cache-bypass to
-    // wait until the necessary work and cache invalidation has completed. Then
-    // we decrement the signal value and fire an event.
-    uint32_t seq = __atomic_fetch_add(&next_eop_seq, 1, __ATOMIC_RELAXED) + 1;
-    uint32_t gfx = base.dev->gfx_version();
-    uint32_t n = 0;
-    n += pm4::release_mem(buf + n, gfx, eop_seq.data(),
-                          static_cast<uint64_t>(seq));
-    n += pm4::wait_reg_mem(buf + n, gfx, eop_seq.data(), Condition::GTE, seq);
-    n += pm4::atomic_mem(buf + n, pm4::ATOMIC_ADD_RTN_64, sig.fence_addr(),
-                         int64_t(-1), 0, pm4::ATOMIC_SINGLE_PASS,
-                         pm4::POLICY_BYPASS);
-    n += pm4::release_mem(buf + n, gfx, sig.signal_addr(), sig.event_id(),
-                          sig.trigger_data());
+    uint32_t n = signal(buf, sig);
     return base.submit(buf, n);
   }
 
@@ -276,15 +263,16 @@ public:
   // Dispatches a kernel launch onto the queue.
   std::expected<void, Error> dispatch(const Kernel &kernel,
                                       const DispatchConfig &cfg,
-                                      const Buffer &kernarg);
+                                      const Buffer &kernarg) {
+    return dispatch(kernel, cfg, kernarg, /*completion=*/nullptr);
+  }
 
   // Variant that submits a completion signal.
   std::expected<void, Error> dispatch(const Kernel &kernel,
                                       const DispatchConfig &cfg,
                                       const Buffer &kernarg,
                                       Signal &completion) {
-    KFD_CHECK(dispatch(kernel, cfg, kernarg));
-    return signal(completion);
+    return dispatch(kernel, cfg, kernarg, &completion);
   }
 
   // Sets the bitfield controlling with CUs workgroups can be dispatched to.
@@ -305,6 +293,29 @@ private:
   static constexpr uint32_t SIGNAL_DWORDS =
       pm4::RELEASE_MEM_DWORDS + pm4::WAIT_REG_MEM_DWORDS +
       pm4::ATOMIC_MEM_DWORDS + pm4::RELEASE_MEM_DWORDS;
+
+  std::expected<void, Error> dispatch(const Kernel &kernel,
+                                      const DispatchConfig &cfg,
+                                      const Buffer &kernarg,
+                                      Signal *completion);
+
+  // We use a RELEASE_MEM packet with the sequence counter and cache-bypass to
+  // wait until the necessary work and cache invalidation has completed. Then
+  // we decrement the signal value and fire an event.
+  uint32_t signal(uint32_t *buf, Signal &sig) {
+    uint32_t seq = __atomic_fetch_add(&next_eop_seq, 1, __ATOMIC_RELAXED) + 1;
+    uint32_t gfx = base.dev->gfx_version();
+    uint32_t n = 0;
+    n += pm4::release_mem(buf + n, gfx, eop_seq.data(),
+                          static_cast<uint64_t>(seq));
+    n += pm4::wait_reg_mem(buf + n, gfx, eop_seq.data(), Condition::GTE, seq);
+    n += pm4::atomic_mem(buf + n, pm4::ATOMIC_ADD_RTN_64, sig.fence_addr(),
+                         int64_t(-1), 0, pm4::ATOMIC_SINGLE_PASS,
+                         pm4::POLICY_BYPASS);
+    n += pm4::release_mem(buf + n, gfx, sig.signal_addr(), sig.event_id(),
+                          sig.trigger_data());
+    return n;
+  }
 
   explicit ComputeQueue(QueueBase &&b, Buffer &&vram)
       : eop_seq(std::move(vram)), base(std::move(b)) {}
