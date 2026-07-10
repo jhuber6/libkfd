@@ -757,12 +757,13 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
         static_cast<std::byte *>(kernarg.data()) +
         detail::align_up(static_cast<size_t>(kd.kernarg_size), size_t(64));
 
-  // Invalidate scalar caches (K-cache / GLK) so the shader reads fresh
-  // kernarg data. RELEASE_MEM only flushes L2 and vector L1; the scalar L1
-  // retains stale entries across dispatches to the same kernarg address.
+  // Invalidate scalar and vector caches (K-cache / GLK V-cache) so the shader
+  // reads fresh kernarg data. RELEASE_MEM only flushes L2 and vector L1; the
+  // scalar L1 retains stale entries across dispatches to the same kernarg.
   uint32_t
       buf[pm4::ACQUIRE_MEM_DWORDS + pm4::MAX_DISPATCH_DWORDS + SIGNAL_DWORDS];
-  uint32_t n = pm4::acquire_mem(buf, base.dev->gfx_version(), pm4::ACQ_KCACHE);
+  uint32_t n = pm4::acquire_mem(buf, base.dev->gfx_version(),
+                                pm4::ACQ_KCACHE | pm4::ACQ_VCACHE);
 
   // Resolve the launch sub-range for manual launch grid partitioning. A
   // non-zero origin covers [start, start + count) and reports absolute
