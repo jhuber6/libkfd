@@ -56,6 +56,21 @@ public:
   size_t ring_dwords() const { return ring.size() / sizeof(uint32_t); }
   explicit operator bool() const { return ctx != nullptr; }
 
+  // Returns a rough approximation of the amount of work still in-flight.
+  uint32_t queue_depth() const {
+    uint32_t cap = static_cast<uint32_t>(ring_dwords());
+    uint32_t mask = cap - 1;
+    uint32_t rp = __atomic_load_n(
+        reinterpret_cast<const volatile uint32_t *>(&ctl()->read_ptr),
+        __ATOMIC_ACQUIRE);
+
+    // SDMA engines report their packets in bytes while PM4 uses 32-byte words.
+    if (is_sdma())
+      rp /= sizeof(uint32_t);
+    uint64_t wptr = __atomic_load_n(&pending_wptr, __ATOMIC_ACQUIRE);
+    return ((static_cast<uint32_t>(wptr) & mask) + cap - (rp & mask)) % cap;
+  }
+
 private:
   friend class ComputeQueue;
   friend class SDMAQueue;
@@ -99,6 +114,9 @@ private:
 
   QueueControl *ctl() const {
     return static_cast<QueueControl *>(control.data());
+  }
+  bool is_sdma() const {
+    return type == QueueType::SDMA || type == QueueType::SDMA_XGMI;
   }
   std::expected<void, Error> wait_for_room(uint32_t dwords);
   static bool queue_error_handler(void *user_data);
@@ -300,6 +318,7 @@ public:
   uint32_t gfx_version() const { return base.dev->gfx_version(); }
   uint32_t queue_id() const { return base.queue_id(); }
   size_t ring_dwords() const { return base.ring_dwords(); }
+  uint32_t queue_depth() const { return base.queue_depth(); }
   explicit operator bool() const { return static_cast<bool>(base); }
 
 private:
@@ -458,6 +477,7 @@ public:
 
   uint32_t queue_id() const { return base.queue_id(); }
   size_t ring_dwords() const { return base.ring_dwords(); }
+  uint32_t queue_depth() const { return base.queue_depth(); }
   explicit operator bool() const { return static_cast<bool>(base); }
 
 private:

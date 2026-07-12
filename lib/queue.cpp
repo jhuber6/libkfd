@@ -563,7 +563,7 @@ std::expected<void, Error> QueueBase::wait_for_room(uint32_t dwords) {
   uint64_t deadline_ns = 0;
   for (;;) {
     uint32_t rp = __atomic_load_n(rp_addr, __ATOMIC_ACQUIRE);
-    if (type == QueueType::SDMA)
+    if (is_sdma())
       rp /= sizeof(uint32_t);
     uint32_t in_flight = (pos + cap - rp) % cap;
     if (in_flight + dwords < cap)
@@ -606,7 +606,7 @@ std::expected<void, Error> QueueBase::submit_impl(const uint32_t *data,
   uint32_t pos = static_cast<uint32_t>(pending_wptr & mask);
 
   auto to_hw = [this](uint64_t wptr) -> uint64_t {
-    return type == QueueType::SDMA ? wptr * sizeof(uint32_t) : wptr;
+    return is_sdma() ? wptr * sizeof(uint32_t) : wptr;
   };
 
   volatile uint64_t *wptr_p = &ctl()->write_ptr;
@@ -615,7 +615,7 @@ std::expected<void, Error> QueueBase::submit_impl(const uint32_t *data,
     uint32_t pad = cap - pos;
     KFD_CHECK(wait_for_room(pad));
 
-    if (type == QueueType::SDMA) {
+    if (is_sdma()) {
       base[pos] = static_cast<uint32_t>(pad - 1) << 16;
       for (uint32_t i = 1; i < pad; ++i)
         base[pos + i] = 0;
@@ -623,7 +623,7 @@ std::expected<void, Error> QueueBase::submit_impl(const uint32_t *data,
       pm4::nop_fill(base + pos, pad);
     }
 
-    pending_wptr += pad;
+    __atomic_store_n(&pending_wptr, pending_wptr + pad, __ATOMIC_RELEASE);
     uint64_t hw = to_hw(pending_wptr);
     memory_barrier();
     *wptr_p = hw;
@@ -635,7 +635,7 @@ std::expected<void, Error> QueueBase::submit_impl(const uint32_t *data,
   KFD_CHECK(wait_for_room(n));
 
   std::memcpy(base + pos, data, n * sizeof(uint32_t));
-  pending_wptr += n;
+  __atomic_store_n(&pending_wptr, pending_wptr + n, __ATOMIC_RELEASE);
 
   uint64_t hw = to_hw(pending_wptr);
   memory_barrier();
