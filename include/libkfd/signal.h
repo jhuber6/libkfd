@@ -40,12 +40,11 @@ public:
   // GPU-writable fence value decremented by queues on completion.
   uint32_t *fence_addr() const { return fence; }
   // Event page slot address written to trigger the kernel interrupt.
-  void *signal_addr() const { return event.signal_addr(); }
+  void *signal_addr() const { return ev.signal_addr(); }
 
-  uint32_t event_id() const { return event.event_id(); }
-  uint32_t trigger_data() const { return event.trigger_data(); }
-  Event *event_ptr() { return &event; }
-  int kfd_fd() const;
+  uint32_t event_id() const { return ev.event_id(); }
+  uint32_t trigger_data() const { return ev.trigger_data(); }
+  Event &event() { return ev; }
 
   // Return the current value of the signal.
   uint32_t value() const { return __atomic_load_n(fence, __ATOMIC_RELAXED); }
@@ -54,7 +53,7 @@ public:
   std::expected<void, Error> reset(uint32_t value = 1);
 
   // Signal the underlying event to wake a pending wait.
-  std::expected<void, Error> signal() { return event.signal(); }
+  std::expected<void, Error> signal() { return ev.signal(); }
 
   // Block until the fence value satisfies the condition against the compare
   // value, spinning first then falling back to an interrupt-driven wait.
@@ -62,14 +61,14 @@ public:
                                   uint64_t timeout_ns,
                                   uint64_t spin_ns = 1'000'000);
 
-  explicit operator bool() const { return static_cast<bool>(event); }
+  explicit operator bool() const { return static_cast<bool>(ev); }
 
 private:
   Signal(Event &&ev, uint32_t *fence, uint32_t initial)
-      : event(std::move(ev)), fence(fence) {
+      : ev(std::move(ev)), fence(fence) {
     __atomic_store_n(this->fence, initial, __ATOMIC_RELAXED);
   }
-  Event event;
+  Event ev;
   uint32_t *fence = nullptr;
 };
 

@@ -64,7 +64,7 @@ std::expected<void, Error> event_wait(std::span<Signal *> signals,
                                       bool wait_for_all, uint64_t timeout_ns) {
   detail::SmallVector<Event *, 8> events;
   for (auto *s : signals)
-    KFD_CHECK(events.push_back(s->event_ptr()));
+    KFD_CHECK(events.push_back(&s->event()));
   if (wait_for_all)
     return kfd::wait_all({events.data(), events.size()}, timeout_ns);
   auto r = kfd::wait_any({events.data(), events.size()}, timeout_ns);
@@ -88,20 +88,17 @@ std::expected<Signal, Error> Signal::create(Context &ctx, uint32_t initial) {
   return sig;
 }
 
-int Signal::kfd_fd() const { return event.kfd_fd(); }
-
 std::expected<void, Error> Signal::reset(uint32_t value) {
   __atomic_store_n(fence, value, __ATOMIC_RELEASE);
   return {};
 }
 
 Signal::Signal(Signal &&other)
-    : event(std::move(other.event)),
-      fence(std::exchange(other.fence, nullptr)) {}
+    : ev(std::move(other.ev)), fence(std::exchange(other.fence, nullptr)) {}
 
 Signal &Signal::operator=(Signal &&other) {
   if (this != &other) {
-    event = std::move(other.event);
+    ev = std::move(other.ev);
     fence = std::exchange(other.fence, nullptr);
   }
   return *this;
