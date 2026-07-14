@@ -218,35 +218,42 @@ public:
     return base.submit(buf, pm4::WAIT_REG_MEM_DWORDS);
   }
 
-  std::expected<void, Error> release_mem(uint32_t ordinal2, pm4::DataSel data,
-                                         pm4::IntSel intr, void *addr = nullptr,
-                                         uint64_t value = 0,
-                                         uint32_t int_ctxid = 0) {
-    uint32_t buf[pm4::RELEASE_MEM_DWORDS];
-    pm4::release_mem(buf, ordinal2, data, intr, addr, value, int_ctxid);
-    return base.submit(buf, pm4::RELEASE_MEM_DWORDS);
-  }
-
-  // Writes the value to the address on EOP flush, does not stall the CP unlike
-  // the signal interface, but requires manual lifetime management.
-  std::expected<void, Error> release_mem(uint64_t *addr, uint64_t value) {
-    uint32_t buf[pm4::RELEASE_MEM_DWORDS];
-    pm4::release_mem(buf, base.dev->gfx_version(), addr, value);
-    return base.submit(buf, pm4::RELEASE_MEM_DWORDS);
-  }
-
-  // Triggers the kfd event on the queue's EOP completion.
-  std::expected<void, Error> release_mem(Event &event) {
-    uint32_t buf[pm4::RELEASE_MEM_DWORDS];
-    pm4::release_mem(buf, base.dev->gfx_version(), event.signal_addr(),
-                     event.event_id(), event.trigger_data());
-    return base.submit(buf, pm4::RELEASE_MEM_DWORDS);
-  }
-
+  // Invalidates the selected caches on the command buffer's end-of-pipe flush.
+  // If present, writes the requested value to the address one completion and
+  // fires an interrupt to the appropriate id.
   std::expected<void, Error>
-  acquire_mem(pm4::AcquireMemFlags flags = pm4::ACQ_ALL) {
+  release_mem(pm4::ReleaseMemFlags flush = pm4::REL_ALL, void *addr = nullptr,
+              uint64_t value = 0, Event *event = nullptr) {
+    uint32_t gfx = base.dev->gfx_version();
+    uint32_t buf[2 * pm4::RELEASE_MEM_DWORDS];
+    uint32_t n = 0;
+
+    // Fence write, or a plain flush-only barrier when no extr arguments given..
+    if (addr || !event)
+      n += pm4::release_mem(buf, pm4::eop_flush(gfx, flush),
+                            addr ? pm4::DATA_64 : pm4::DATA_NONE, pm4::INT_NONE,
+                            addr, value);
+
+    // Fire the event in a second packet by writing to the signal page address.
+    if (event)
+      n += pm4::release_mem(
+          buf + n, pm4::eop_flush(gfx, n ? pm4::ReleaseMemFlags(0) : flush),
+          pm4::DATA_64, pm4::INT_DATA_CONFIRM, event->signal_addr(),
+          event->event_id(), event->trigger_data());
+
+    return base.submit(buf, n);
+  }
+
+  // Invalidates the selected caches over the given range. This is required to
+  // properly flush caches if memory has been modified at all.
+  std::expected<void, Error>
+  acquire_mem(pm4::AcquireMemFlags flags = pm4::ACQ_ALL,
+              const void *range_base = nullptr,
+              uint64_t range_size = UINT64_MAX) {
     uint32_t buf[pm4::ACQUIRE_MEM_DWORDS];
-    auto n = pm4::acquire_mem(buf, base.dev->gfx_version(), flags);
+    auto n =
+        pm4::acquire_mem(buf, base.dev->gfx_version(), flags,
+                         reinterpret_cast<uint64_t>(range_base), range_size);
     return base.submit(buf, n);
   }
 

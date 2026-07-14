@@ -460,6 +460,20 @@ inline uint32_t dma_data_fill(uint32_t *out, void *dst, uint32_t value,
 // References: amdgpu/soc15d.h; amdgpu/nvd.h (PACKET3_RELEASE_MEM);
 //             amdkfd/kfd_pm4_headers_vi.h (ordinal2/ordinal3 bitfields);
 //             gfx_v9_0_ring_emit_fence; gfx_v10_0_ring_emit_fence
+enum ReleaseMemFlags : uint32_t {
+  REL_VCACHE = 1u << 0, // Vector L0/L1 invalidate (GLV + GL1 / TCL1)
+  REL_L2_INV = 1u << 1, // L2 / GL2 invalidate
+  REL_L2_WB = 1u << 2,  // L2 / GL2 writeback
+  REL_META = 1u << 3,   // Metadata (GLM WB + INV / TC_MD)
+
+  REL_ALL = REL_VCACHE | REL_L2_INV | REL_L2_WB | REL_META,
+};
+
+inline constexpr ReleaseMemFlags operator|(ReleaseMemFlags a,
+                                           ReleaseMemFlags b) {
+  return static_cast<ReleaseMemFlags>(static_cast<uint32_t>(a) |
+                                      static_cast<uint32_t>(b));
+}
 
 // Data selection for RELEASE_MEM ordinal3[31:29].
 enum DataSel : uint32_t {
@@ -526,6 +540,40 @@ inline uint32_t eop_wb_flush(uint32_t gfx_version) {
   return dw;
 }
 
+// Build a RELEASE_MEM ordinal2 (EOP event + cache actions) from an explicit
+// set of cache levels, mapping each level to its generation-specific bit.
+// GCR_SEQ (GFX10+) and a BYPASS fence-write policy are always set so the
+// trailing fence value lands in memory after the selected cache actions
+// complete. The eop_fence_flush()/eop_wb_flush() presets remain the
+// recommended defaults; this is for callers that want explicit control.
+inline uint32_t eop_flush(uint32_t gfx_version,
+                          ReleaseMemFlags flags = REL_ALL) {
+  uint32_t dw = 0x14 | (5u << 8);
+  if (gfx_version >= abi::GFX_VERSION_GFX10_1) {
+    if (flags & REL_META)
+      dw |= (1u << 12) | (1u << 13); // GCR_GLM_WB + GLM_INV
+    if (flags & REL_VCACHE)
+      dw |= (1u << 14) | (1u << 15); // GCR_GLV_INV + GL1_INV
+    if (flags & REL_L2_INV)
+      dw |= (1u << 20); // GCR_GL2_INV
+    if (flags & REL_L2_WB)
+      dw |= (1u << 21); // GCR_GL2_WB
+    dw |= (1u << 22)    // GCR_SEQ
+          | (3u << 25); // CACHE_POLICY = BYPASS
+  } else {
+    if (flags & REL_L2_WB)
+      dw |= (1u << 15); // EOP_TC_WB_ACTION_EN
+    if (flags & REL_VCACHE)
+      dw |= (1u << 16); // EOP_TCL1_ACTION_EN (L1 invalidate)
+    if (flags & REL_L2_INV)
+      dw |= (1u << 17); // EOP_TC_ACTION_EN (L2 invalidate)
+    if (flags & REL_META)
+      dw |= (1u << 21); // EOP_TC_MD_ACTION_EN
+    dw |= (3u << 25);   // CACHE_POLICY = BYPASS
+  }
+  return dw;
+}
+
 // Flexible RELEASE_MEM builder. Takes a pre-built ordinal2 (from
 // eop_fence_flush(), eop_wb_flush(), or hand-constructed) and explicit
 // data/interrupt selection. All convenience wrappers below delegate here.
@@ -544,25 +592,23 @@ inline uint32_t release_mem(uint32_t *out, uint32_t ordinal2, DataSel data,
   return RELEASE_MEM_DWORDS;
 }
 
-// Fence write, full flush, no interrupt.
+// Standard full-flush fence, no interrupt. Writes a 64-bit value at
+// 'fence_addr' when given and otherwise omitted.
 inline uint32_t release_mem(uint32_t *out, uint32_t gfx_version,
-                            void *fence_addr, uint64_t fence_value) {
-  return release_mem(out, eop_fence_flush(gfx_version), DATA_64, INT_NONE,
-                     fence_addr, fence_value);
+                            void *fence_addr = nullptr,
+                            uint64_t fence_value = 0) {
+  return release_mem(out, eop_fence_flush(gfx_version),
+                     fence_addr ? DATA_64 : DATA_NONE, INT_NONE, fence_addr,
+                     fence_value);
 }
 
-// Fence write + interrupt routed to a KFD event via int_ctxid.
+// Standard full-flush fence + interrupt routed to a KFD event via int_ctxid.
 inline uint32_t release_mem(uint32_t *out, uint32_t gfx_version,
                             void *fence_addr, uint32_t fence_value,
                             uint32_t int_ctxid) {
   return release_mem(out, eop_fence_flush(gfx_version), DATA_64,
                      INT_DATA_CONFIRM, fence_addr,
                      static_cast<uint64_t>(fence_value), int_ctxid);
-}
-
-// Flush-only, no data write or interrupt.
-inline uint32_t release_mem(uint32_t *out, uint32_t gfx_version) {
-  return release_mem(out, eop_fence_flush(gfx_version), DATA_NONE, INT_NONE);
 }
 
 // ACQUIRE_MEM - invalidate / writeback selected GPU caches.
@@ -572,7 +618,7 @@ inline uint32_t release_mem(uint32_t *out, uint32_t gfx_version) {
 // specify an abstract bitmask of AcquireMemFlags; the function translates
 // these into the generation-specific hardware bits.
 //
-// COHER_SIZE/COHER_BASE are set to the maximum range (full flush).
+// COHER_SIZE/COHER_BASE are set to the maximum range by default (full flush).
 // Ranged invalidation is possible by setting specific COHER_BASE/SIZE
 // and GL2_RANGE modes on GFX10+.
 //
@@ -613,11 +659,11 @@ inline uint32_t release_mem(uint32_t *out, uint32_t gfx_version) {
 // References: amdgpu/soc15d.h; amdgpu/nvd.h;
 //             gfx_v9_0_emit_mem_sync; gfx_v10_0_emit_mem_sync
 enum AcquireMemFlags : uint32_t {
-  ACQ_KCACHE = 1u << 0, // Scalar L1 (K-cache / GLK)
-  ACQ_ICACHE = 1u << 1, // Instruction cache
-  ACQ_VCACHE = 1u << 2, // Vector L1/L0 (TCL1 / GLV + GL1)
-  ACQ_L2_INV = 1u << 3, // L2 / GL2 invalidate
-  ACQ_L2_WB = 1u << 4,  // L2 / GL2 writeback
+  ACQ_KCACHE = 1u << 0, // Scalar L0 (K-cache / GLK), whole-cache only
+  ACQ_ICACHE = 1u << 1, // Instruction cache (SQC I$ / GLI), range-capable
+  ACQ_VCACHE = 1u << 2, // Vector L0 + L1 (TCL1 / GLV + GL1); GLV whole-cache
+  ACQ_L2_INV = 1u << 3, // L2 / GL2 invalidate, range-capable
+  ACQ_L2_WB = 1u << 4,  // L2 / GL2 writeback, range-capable
   ACQ_META = 1u << 5,   // Metadata (GL metadata WB + INV)
 
   ACQ_ALL = ACQ_KCACHE | ACQ_ICACHE | ACQ_VCACHE | ACQ_L2_INV | ACQ_L2_WB |
@@ -633,7 +679,8 @@ inline constexpr AcquireMemFlags operator|(AcquireMemFlags a,
 inline constexpr uint32_t ACQUIRE_MEM_DWORDS = 8;
 
 inline uint32_t acquire_mem(uint32_t *out, uint32_t gfx_target_version,
-                            AcquireMemFlags flags = ACQ_ALL) {
+                            AcquireMemFlags flags = ACQ_ALL, uint64_t base = 0,
+                            uint64_t size = UINT64_MAX) {
   bool gfx10_plus = gfx_target_version >= abi::GFX_VERSION_GFX10_1;
   uint32_t dwords = gfx10_plus ? 8u : 7u;
 
@@ -642,6 +689,7 @@ inline uint32_t acquire_mem(uint32_t *out, uint32_t gfx_target_version,
 
   out[0] = header(Opcode::ACQUIRE_MEM, static_cast<uint16_t>(dwords - 2));
 
+  const bool ranged = size < (uint64_t(1) << 48);
   if (!gfx10_plus) {
     uint32_t cntl = 0;
     if (flags & ACQ_KCACHE)
@@ -656,24 +704,40 @@ inline uint32_t acquire_mem(uint32_t *out, uint32_t gfx_target_version,
       cntl |= (1u << 18); // TC_WB_ACTION_ENA
     out[1] = cntl;
   } else {
+    // GLI_INV / GL1_RANGE / GL2_RANGE take a 2-bit mode: 1 = ALL, 2 = RANGE.
     uint32_t gcr = 0;
+    if (flags & ACQ_ICACHE)
+      gcr |= (ranged ? 2u : 1u) << 0; // GLI_INV = RANGE or ALL
     if (flags & ACQ_KCACHE)
-      gcr |= (1u << 7); // GLK_INV
-    if (flags & ACQ_VCACHE)
-      gcr |= (1u << 0)                // GLI_INV = ALL
-             | (1u << 8) | (1u << 9); // GLV_INV + GL1_INV
-    if (flags & ACQ_L2_INV)
-      gcr |= (1u << 14); // GL2_INV
-    if (flags & ACQ_L2_WB)
-      gcr |= (1u << 15); // GL2_WB
+      gcr |= (1u << 7); // GLK_INV (whole cache)
+    if (flags & ACQ_VCACHE) {
+      gcr |= (1u << 8) | (1u << 9); // GLV_INV (whole cache) + GL1_INV
+      if (ranged)
+        gcr |= (2u << 2); // GL1_RANGE = RANGE
+    }
+    if (flags & (ACQ_L2_INV | ACQ_L2_WB)) {
+      if (flags & ACQ_L2_INV)
+        gcr |= (1u << 14); // GL2_INV
+      if (flags & ACQ_L2_WB)
+        gcr |= (1u << 15); // GL2_WB
+      if (ranged)
+        gcr |= (2u << 11); // GL2_RANGE = RANGE
+    }
     if (flags & ACQ_META)
       gcr |= (1u << 4) | (1u << 5); // GLM_WB + GLM_INV
     out[7] = gcr;
   }
 
-  out[2] = 0xFFFFFFFF; // COHER_SIZE    (full flush)
-  out[3] = 0x00FFFFFF; // COHER_SIZE_HI (full flush)
-  out[6] = 0x0000000A; // POLL_INTERVAL
+  // COHER_SIZE is a 40-bit count of 256-byte granules and COHER_BASE is given
+  // relative to the ganule size.
+  constexpr uint64_t max_granules = (uint64_t(1) << 40) - 1;
+  uint64_t granules =
+      detail::min((size >> 8) + ((size & 0xFFu) != 0), max_granules);
+  out[2] = static_cast<uint32_t>(granules);               // COHER_SIZE
+  out[3] = static_cast<uint32_t>(granules >> 32) & 0xFFu; // COHER_SIZE_HI
+  out[4] = static_cast<uint32_t>(base >> 8);              // COHER_BASE_LO
+  out[5] = static_cast<uint32_t>(base >> 40) & 0xFFFFFFu; // COHER_BASE_HI
+  out[6] = 0x0000000A;                                    // POLL_INTERVAL
 
   return dwords;
 }

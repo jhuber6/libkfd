@@ -707,10 +707,8 @@ TEST_CASE("Queue - custom release_mem with host pointer polling",
       *fence = 0;
 
       constexpr uint64_t SENTINEL = 0xDEAD'BEEF'CAFE'BABEull;
-      uint32_t ordinal2 = kfd::pm4::eop_fence_flush(gpu.gfx_version());
-      REQUIRE_RESULT(queue->release_mem(ordinal2, kfd::pm4::DATA_64,
-                                        kfd::pm4::DATA_CONFIRM, buf.data(),
-                                        SENTINEL));
+      REQUIRE_RESULT(
+          queue->release_mem(kfd::pm4::REL_ALL, buf.data(), SENTINEL));
 
       REQUIRE(poll_value(reinterpret_cast<uint32_t *>(buf.data()),
                          static_cast<uint32_t>(SENTINEL)));
@@ -737,17 +735,10 @@ TEST_CASE("Queue - custom release_mem with manual event", "[queue][custom]") {
       *fence = 0;
 
       constexpr uint64_t DONE = 42;
-      uint32_t ordinal2 = kfd::pm4::eop_fence_flush(gpu.gfx_version());
-      REQUIRE_RESULT(queue->release_mem(ordinal2, kfd::pm4::DATA_64,
-                                        kfd::pm4::DATA_CONFIRM, buf.data(),
-                                        DONE));
-
-      // Then fire the event: the kernel requires event_id written to
-      // signal_addr.
-      REQUIRE_RESULT(queue->release_mem(
-          ordinal2, kfd::pm4::DATA_64, kfd::pm4::INT_DATA_CONFIRM,
-          event->signal_addr(), static_cast<uint64_t>(event->event_id()),
-          event->trigger_data()));
+      // A single call does both: writes the fence value for CPU polling and
+      // fires the event (writing its signal slot + interrupt) via two packets.
+      REQUIRE_RESULT(
+          queue->release_mem(kfd::pm4::REL_ALL, buf.data(), DONE, &*event));
 
       REQUIRE_RESULT(event->wait(kfd::test::WAIT_TIMEOUT_NS));
       CHECK(*fence == DONE);
@@ -770,10 +761,7 @@ TEST_CASE("Queue - custom release_mem writeback-only fence",
       *fence = 0;
 
       constexpr uint64_t VAL = 0x1234;
-      uint32_t ordinal2 = kfd::pm4::eop_wb_flush(gpu.gfx_version());
-      REQUIRE_RESULT(queue->release_mem(ordinal2, kfd::pm4::DATA_64,
-                                        kfd::pm4::DATA_CONFIRM, buf.data(),
-                                        VAL));
+      REQUIRE_RESULT(queue->release_mem(kfd::pm4::REL_L2_WB, buf.data(), VAL));
 
       REQUIRE(poll_value(reinterpret_cast<uint32_t *>(buf.data()),
                          static_cast<uint32_t>(VAL)));
@@ -905,34 +893,6 @@ TEST_CASE("Queue - COPY_DATA GPU clock monotonicity", "[queue][copy_data]") {
         CHECK(stamps[i] != 0);
       for (size_t i = 1; i < N; ++i)
         CHECK(stamps[i] >= stamps[i - 1]);
-    }
-  }
-}
-
-TEST_CASE("Queue - custom release_mem timestamp", "[queue][custom]") {
-  auto &ctx = require_ctx();
-  for (size_t di = 0; di < ctx.num_devices(); ++di) {
-    DYNAMIC_SECTION("device " << di) {
-      auto &gpu = require_gpu(ctx, di);
-
-      auto queue = kfd::ComputeQueue::create(gpu);
-      REQUIRE_RESULT(queue);
-
-      auto buf = alloc_host_buffer(gpu);
-      auto *ts = static_cast<volatile uint64_t *>(buf.data());
-      *ts = 0;
-
-      uint32_t ordinal2 = kfd::pm4::eop_fence_flush(gpu.gfx_version());
-      REQUIRE_RESULT(queue->release_mem(ordinal2, kfd::pm4::DATA_TIMESTAMP,
-                                        kfd::pm4::DATA_CONFIRM, buf.data()));
-
-      // Poll the low dword until it becomes nonzero; timestamp writes both
-      // halves.
-      auto *lo32 = reinterpret_cast<uint32_t *>(buf.data());
-      for (int i = 0; i < 5'000'000 && *ts == 0; ++i)
-        kfd::detail::spin_hint();
-      (void)lo32;
-      CHECK(*ts != 0);
     }
   }
 }

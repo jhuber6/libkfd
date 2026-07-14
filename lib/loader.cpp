@@ -192,9 +192,9 @@ Executable::load(Device &dev, std::span<const std::byte> image,
   KFD_CHECK(compute.dma_copy(img.data(), pinned.data(),
                              static_cast<uint32_t>(footprint)));
 
-  // Invalidate instruction and data caches so the CUs fetch fresh code
-  // from VRAM rather than stale cache lines.
-  KFD_CHECK(compute.acquire_mem());
+  // Invalidate instruction caches so the CUs fetch fresh code from VRAM rather
+  // than stale cache lines.
+  KFD_CHECK(compute.acquire_mem(pm4::ACQ_ICACHE, img.data(), footprint));
   KFD_CHECK(compute.signal(sig));
 
   // Wait on all pending operations to complete.
