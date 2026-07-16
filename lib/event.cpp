@@ -103,6 +103,7 @@ std::expected<void, Error> Event::wait(uint64_t timeout_ns) {
       detail::max(static_cast<uint32_t>(timeout_ns / 1'000'000), 1u);
   ioctl::kfd::event_data ed{};
   ed.event_id = id;
+  ed.signal_event_data.last_event_age = age;
 
   ioctl::kfd::wait_events_args args{
       .events_ptr = reinterpret_cast<uintptr_t>(&ed),
@@ -116,6 +117,8 @@ std::expected<void, Error> Event::wait(uint64_t timeout_ns) {
   if (args.wait_result != KFD_IOC_WAIT_RESULT_COMPLETE)
     return kfd::unexpected(EIO, "event %u wait failed (wait_result=%u)", id,
                            args.wait_result);
+  if (uint64_t na = ed.signal_event_data.last_event_age)
+    age = na;
   event_data = make_event_data(ed);
   return {};
 }
@@ -133,8 +136,8 @@ std::expected<void, Error> Event::signal() {
 namespace {
 
 std::expected<detail::SmallVector<ioctl::kfd::event_data, 8>, Error>
-do_wait_events(std::span<Event *> events, bool wait_for_all,
-               uint64_t timeout_ns) {
+do_wait_events(std::span<Event *> events, std::span<const uint64_t> ages,
+               bool wait_for_all, uint64_t timeout_ns) {
   uint32_t timeout_ms =
       detail::max(static_cast<uint32_t>(timeout_ns / 1'000'000), 1u);
   auto n = static_cast<uint32_t>(events.size());
@@ -143,6 +146,7 @@ do_wait_events(std::span<Event *> events, bool wait_for_all,
   for (uint32_t i = 0; i < n; ++i) {
     eds[i] = {};
     eds[i].event_id = events[i]->event_id();
+    eds[i].signal_event_data.last_event_age = ages[i];
   }
 
   int fd = events.front()->kfd_fd();
@@ -168,9 +172,17 @@ std::expected<void, Error> wait_all(std::span<Event *> events,
                                     uint64_t timeout_ns) {
   if (events.empty())
     return {};
-  auto eds = KFD_TRY(do_wait_events(events, true, timeout_ns));
-  for (uint32_t i = 0; i < static_cast<uint32_t>(events.size()); ++i)
+  detail::SmallVector<uint64_t, 8> ages;
+  KFD_CHECK(ages.resize(events.size()));
+  for (size_t i = 0; i < events.size(); ++i)
+    ages[i] = events[i]->age;
+  auto eds = KFD_TRY(
+      do_wait_events(events, {ages.data(), ages.size()}, true, timeout_ns));
+  for (size_t i = 0; i < events.size(); ++i) {
     events[i]->event_data = make_event_data(eds[i]);
+    if (uint64_t na = eds[i].signal_event_data.last_event_age)
+      events[i]->age = na;
+  }
   return {};
 }
 
@@ -179,16 +191,26 @@ std::expected<size_t, Error> wait_any(std::span<Event *> events,
   if (events.empty())
     return kfd::unexpected(EINVAL, "wait_any called with no events");
 
-  auto eds = KFD_TRY(do_wait_events(events, false, timeout_ns));
-  for (uint32_t i = 0; i < static_cast<uint32_t>(events.size()); ++i)
-    events[i]->event_data = make_event_data(eds[i]);
+  detail::SmallVector<uint64_t, 8> ages;
+  KFD_CHECK(ages.resize(events.size()));
+  for (size_t i = 0; i < events.size(); ++i)
+    ages[i] = events[i]->age;
+  auto eds = KFD_TRY(
+      do_wait_events(events, {ages.data(), ages.size()}, false, timeout_ns));
 
+  size_t signaled = SIZE_MAX;
   for (size_t i = 0; i < events.size(); ++i) {
-    if (eds[i].signal_event_data.last_event_age ||
-        eds[i].hw_exception_data.gpu_id)
-      return i;
+    events[i]->event_data = make_event_data(eds[i]);
+    uint64_t na = eds[i].signal_event_data.last_event_age;
+    bool fired = (na && na != ages[i]) || eds[i].hw_exception_data.gpu_id;
+    if (na)
+      events[i]->age = na;
+    if (fired && signaled == SIZE_MAX)
+      signaled = i;
   }
-  return kfd::unexpected(EIO, "wait_any completed but no event was signaled");
+  if (signaled == SIZE_MAX)
+    return kfd::unexpected(EIO, "wait_any completed but no event was signaled");
+  return signaled;
 }
 
 } // namespace kfd

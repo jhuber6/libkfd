@@ -107,6 +107,7 @@ private:
   uint32_t slot_idx = 0;
   void *slot_addr = nullptr;
   EventData event_data{};
+  uint64_t age = 1;
 };
 
 std::expected<void, Error> wait_all(std::span<Event *> events,
