@@ -26,6 +26,7 @@ enum class Opcode : uint8_t {
   NOP = 0x10,
   DISPATCH_DIRECT = 0x15,
   ATOMIC_MEM = 0x1E,
+  COND_EXEC = 0x22,
   WRITE_DATA = 0x37,
   WAIT_REG_MEM = 0x3C,
   RELEASE_MEM = 0x49,
@@ -33,6 +34,7 @@ enum class Opcode : uint8_t {
   ACQUIRE_MEM = 0x58,
   INDIRECT_BUFFER = 0x3F,
   COPY_DATA = 0x40,
+  COND_WRITE = 0x45,
   SET_SH_REG = 0x76,
 };
 
@@ -962,6 +964,116 @@ inline uint32_t indirect_buffer(uint32_t *out, const void *ib_addr,
   out[3] = (ib_size_dwords & 0xFFFFFu) | (1u << 23) // VALID
            | (static_cast<uint32_t>(policy) << 28);
   return INDIRECT_BUFFER_DWORDS;
+}
+
+// COND_INDIRECT_BUFFER - execute an IB only if a memory comparison holds.
+// Shares opcode 0x3F with INDIRECT_BUFFER; the CP disambiguates on the count.
+//
+// Packet layout (14 dwords, count = 12):
+//   [0]     header       - opcode 0x3F, count = 12
+//   [1]     control      - mode[1:0] (1 = compare), function[10:8]
+//   [2-3]   compare_addr - 64-bit poll byte address (8-byte aligned)
+//   [4-5]   mask         - 64-bit mask applied before comparison
+//   [6-7]   reference    - 64-bit value compared against
+//   [8-9]   ib_base      - IB run when the comparison passes
+//   [10]    ib_ctl       - ib size[19:0], cache_policy[29:28]
+//   [11-13] reserved     - second IB slot; unused in mode 1 (see NOTE)
+//
+// The CP evaluates (compare[addr] & mask) <cond> reference; if it holds the IB
+// executes, otherwise the CP falls through to the next packet. cond reuses the
+// WAIT_REG_MEM condition encoding.
+//
+// NOTE: verified on silicon (tests/device/conditional_test.cpp). mode 1 is a
+// single conditional IB - the false path falls through, it does not run a
+// second IB. The trailing dwords are the two-way form's fail-IB slot, zeroed
+// here; the packet is still 14 dwords so they must be present.
+//
+// References: PACKET3_COND_INDIRECT_BUFFER in amdgpu/nvd.h, gfx_v12_1_pkt.h
+inline constexpr uint32_t COND_INDIRECT_BUFFER_DWORDS = 14;
+
+inline uint32_t cond_indirect_buffer(uint32_t *out, Condition cond,
+                                     const void *compare_addr, uint64_t mask,
+                                     uint64_t reference, const void *ib_addr,
+                                     uint32_t ib_dwords,
+                                     CachePolicy policy = POLICY_LRU) {
+  out[0] = header(Opcode::INDIRECT_BUFFER, 12);
+  out[1] = 1u | (static_cast<uint32_t>(cond) << 8); // mode = 1, function[10:8]
+  out[2] = detail::lo(reinterpret_cast<uintptr_t>(compare_addr)) & ~0x7u;
+  out[3] = detail::hi(reinterpret_cast<uintptr_t>(compare_addr));
+  out[4] = detail::lo(mask);
+  out[5] = detail::hi(mask);
+  out[6] = detail::lo(reference);
+  out[7] = detail::hi(reference);
+  out[8] = detail::lo(reinterpret_cast<uintptr_t>(ib_addr)) & ~0x3u;
+  out[9] = detail::hi(reinterpret_cast<uintptr_t>(ib_addr));
+  out[10] = (ib_dwords & 0xFFFFFu) | (static_cast<uint32_t>(policy) << 28);
+  out[11] = 0;
+  out[12] = 0;
+  out[13] = 0;
+  return COND_INDIRECT_BUFFER_DWORDS;
+}
+
+// COND_EXEC - conditionally execute the following packets based on a boolean.
+//
+// Packet layout (5 dwords):
+//   [0]  header     - IT_COND_EXEC, count = 3
+//   [1]  addr_lo    - boolean byte address bits [31:2] (dword-aligned)
+//   [2]  addr_hi    - boolean byte address bits [63:32]
+//   [3]  reserved   - must be 0
+//   [4]  exec_count - number of dwords to conditionally execute
+//
+// The CP reads the dword at the address for a boolean value. If the value is
+// zero it discards (skips) the next exec_count dwords; otherwise they execute.
+//
+// References: PACKET3_COND_EXEC in amdgpu/nvd.h, gfx_v12_1_pkt.h;
+//             gfx_v10_0_ring_emit_init_cond_exec in amdgpu/gfx_v10_0.c
+inline constexpr uint32_t COND_EXEC_DWORDS = 5;
+
+inline uint32_t cond_exec(uint32_t *out, const void *cond, uint32_t skip) {
+  out[0] = header(Opcode::COND_EXEC, 3);
+  out[1] = detail::lo(reinterpret_cast<uintptr_t>(cond)) & ~0x3u;
+  out[2] = detail::hi(reinterpret_cast<uintptr_t>(cond));
+  out[3] = 0;
+  out[4] = skip;
+  return COND_EXEC_DWORDS;
+}
+
+// COND_WRITE - write a value only if a polled location satisfies a condition.
+//
+// Packet layout (9 dwords):
+//   [0]  header        - IT_COND_WRITE, count = 7
+//   [1]  control       - function[2:0], poll_space[4] (0=reg,1=mem),
+//                         write_space[8] (0=reg,1=mem)
+//   [2]  poll_addr_lo  - poll byte address bits [31:2] (or register offset)
+//   [3]  poll_addr_hi  - poll byte address bits [63:32]
+//   [4]  reference     - value compared against (poll_value & mask)
+//   [5]  mask          - applied to the polled value before comparison
+//   [6]  write_addr_lo - write byte address bits [31:2] (or register offset)
+//   [7]  write_addr_hi - write byte address bits [63:32]
+//   [8]  write_data    - dword stored when the comparison passes
+//
+// The CP evaluates (poll[addr] & mask) <cond> reference, if it holds,
+// write_data is stored to write_addr.
+//
+// References: PACKET3_COND_WRITE in amdgpu/nvd.h; the layout is cross-checked
+//             against the evergreen CS validator in radeon/evergreen_cs.c
+//             (poll_space bit 0x10, write_space bit 0x100, count == 7)
+inline constexpr uint32_t COND_WRITE_DWORDS = 9;
+
+inline uint32_t cond_write(uint32_t *out, Condition cond, const void *poll_addr,
+                           uint32_t reference, uint32_t mask, void *write_addr,
+                           uint32_t write_data) {
+  out[0] = header(Opcode::COND_WRITE, 7);
+  out[1] = static_cast<uint32_t>(cond) | (1u << 4) // poll_space = memory
+           | (1u << 8);                            // write_space = memory
+  out[2] = detail::lo(reinterpret_cast<uintptr_t>(poll_addr)) & ~0x3u;
+  out[3] = detail::hi(reinterpret_cast<uintptr_t>(poll_addr));
+  out[4] = reference;
+  out[5] = mask;
+  out[6] = detail::lo(reinterpret_cast<uintptr_t>(write_addr)) & ~0x3u;
+  out[7] = detail::hi(reinterpret_cast<uintptr_t>(write_addr));
+  out[8] = write_data;
+  return COND_WRITE_DWORDS;
 }
 
 // Build the 4-word V# buffer resource descriptor (SRD) for the private
