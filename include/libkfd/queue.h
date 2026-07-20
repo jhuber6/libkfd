@@ -87,15 +87,16 @@ private:
   // cases and expect that no queue will exceed 4 GiB in size. The EOP sequence
   // is increased monotonically to coordinate end-of-pipe events for signals.
   //
-  // Compute queues also use this to signal scratch requests from the handler.
+  // Compute queues also use this to publish the allocated per-wave scratch
+  // capacity, guard the grow handshake, and hold the sticky scratch IB.
   static constexpr size_t MAX_SCRATCH_IB_DWORDS = 20;
   struct QueueControl {
     uint64_t read_ptr;
     uint64_t write_ptr;
     uint64_t eop_seq;
     uint64_t err_payload;
-    uint64_t scratch_ready;
-    uint32_t scratch_done;
+    uint64_t scratch_cur;
+    uint64_t scratch_guard;
     uint32_t indirect[MAX_SCRATCH_IB_DWORDS];
   };
 
@@ -121,6 +122,8 @@ private:
   std::expected<void, Error> wait_for_room(uint32_t dwords);
   static bool queue_error_handler(void *user_data);
   static bool scratch_handler(void *user_data);
+  static bool scratch_grow(ScratchCtx *sctx, uint32_t needed_perwave,
+                           Dim3 block);
 
   QueueType type{};
   Context *ctx = nullptr;

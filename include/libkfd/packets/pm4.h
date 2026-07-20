@@ -1137,14 +1137,14 @@ inline constexpr uint32_t MAX_DISPATCH_DWORDS = 140;
 // SGPR pair. It must point to a filled abi::DispatchPacket (see
 // abi::fill_implicit_args which places one after the implicit args).
 //
-// 'scratch_base' is the GPU VA of the scratch buffer (256B-aligned).
-// 'tmpring_size' is the packed COMPUTE_TMPRING_SIZE register value
-// (WAVES [11:0], WAVESIZE [24:12]+), as returned by compute_tmpring_size().
+// The scratch-owned state (SCRATCH_BASE, TMPRING_SIZE, the private-segment SRD
+// and FLAT_SCRATCH_INIT) is not emitted here; it is installed separately via a
+// scratch indirect buffer, so the user SGPRs are emitted in contiguous runs
+// around the skipped scratch slots.
 inline uint32_t build_dispatch_setup(
     uint32_t *out, uint32_t gfx_version, const abi::KernelDescriptor &kd,
     const void *entry_addr, Dim3 grid, Dim3 block,
     const void *kernarg_addr = nullptr, const void *dispatch_pkt_addr = nullptr,
-    const void *scratch_base = nullptr, uint32_t tmpring_size = 0,
     uint32_t dynamic_lds = 0, uint32_t private_segment_size = 0,
     bool cooperative = false, Dim3 grid_start = {0, 0, 0}) {
   uint32_t written = 0;
@@ -1212,9 +1212,10 @@ inline uint32_t build_dispatch_setup(
   uint32_t i = 0;
   uint16_t props = kd.kernel_code_properties;
 
+  uint32_t srd_count = 0;
+  uint32_t flat_pos = ~0u;
   if (props & abi::ENABLE_SGPR_PRIVATE_SEGMENT_BUFFER) {
-    build_scratch_srd(user_sgpr, gfx_version, scratch_base, tmpring_size,
-                      props);
+    srd_count = 4;
     i += 4;
   }
   if (props & abi::ENABLE_SGPR_DISPATCH_PTR) {
@@ -1242,8 +1243,8 @@ inline uint32_t build_dispatch_setup(
     //
     // References: SIFrameLowering.cpp (flatScratchIsPointer path);
     //             LLVM docs/AMDGPUUsage.rst "Absolute flat scratch"
-    user_sgpr[i++] = detail::lo(scratch_base);
-    user_sgpr[i++] = detail::hi(scratch_base);
+    flat_pos = i;
+    i += 2;
   }
   if (props & abi::ENABLE_SGPR_PRIVATE_SEGMENT_SIZE)
     user_sgpr[i++] = private_segment_size ? private_segment_size
@@ -1260,15 +1261,20 @@ inline uint32_t build_dispatch_setup(
     i += count;
   }
 
-  if (i > 0)
-    written +=
-        set_sh_reg(out + written, regs::COMPUTE_USER_DATA_0, user_sgpr, i);
-
-  // Scratch base + tmpring via the shared helper. When a scratch resize is
-  // pending, the watcher IB overrides these (plus the scratch-dependent
-  // SGPRs) with fresh values after the WAIT_REG_MEM stall.
-  written +=
-      set_scratch_base(out + written, gfx_version, scratch_base, tmpring_size);
+  // We need to emit the user SGPR arguments, but skip over the ones used to set
+  // the scratch and flat scratch bits. These are sticky and set by the watcher.
+  for (uint32_t p = srd_count; p < i;) {
+    if (p == flat_pos) {
+      p += 2;
+      continue;
+    }
+    uint32_t e = p;
+    while (e < i && e != flat_pos)
+      ++e;
+    written += set_sh_reg(out + written, regs::COMPUTE_USER_DATA_0 + p,
+                          user_sgpr + p, e - p);
+    p = e;
+  }
 
   return written;
 }

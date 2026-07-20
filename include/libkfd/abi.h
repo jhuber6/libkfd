@@ -38,6 +38,11 @@ constexpr uint32_t gfx_version_major(uint32_t v) { return (v / 10000) % 100; }
 constexpr uint32_t gfx_version_minor(uint32_t v) { return (v / 100) % 100; }
 constexpr uint32_t gfx_version_step(uint32_t v) { return v % 100; }
 
+// The device's native wavefront size (wave32 on RDNA, wave64 before).
+constexpr uint32_t native_wave_size(uint32_t v) {
+  return v >= GFX_VERSION_GFX10_1 ? 32 : 64;
+}
+
 // COMPUTE_PGM_RSRC1 bit 20: launch waves with STATUS.PRIV=1.
 inline constexpr uint32_t COMPUTE_PGM_RSRC1_PRIV = 1u << 20;
 // COMPUTE_PGM_RSRC1 bit 29: Pair two CUs into a single work-group-processor.

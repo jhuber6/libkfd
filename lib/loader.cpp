@@ -258,6 +258,18 @@ std::expected<Kernel, Error> Executable::kernel(std::string_view name) const {
   const abi::KernelDescriptor *kd =
       reinterpret_cast<const abi::KernelDescriptor *>(descriptor);
 
+  // Reject a non-native wave size (e.g. -mwavefrontsize64 on an RDNA target).
+  uint32_t gfx = image.owner().gfx_version();
+  bool wave32 = kd->kernel_code_properties & abi::ENABLE_WAVEFRONT_SIZE32;
+  if (wave32 != (abi::native_wave_size(gfx) == 32))
+    return unexpected(ENOTSUP,
+                      "kernel '%.*s' is wave%u but gfx%u%u%x is wave%u; "
+                      "non-native wave sizes are unsupported",
+                      static_cast<int>(name.size()), name.data(),
+                      wave32 ? 32u : 64u, abi::gfx_version_major(gfx),
+                      abi::gfx_version_minor(gfx), abi::gfx_version_step(gfx),
+                      abi::native_wave_size(gfx));
+
   int64_t entry_off =
       kd->kernel_code_entry_byte_offset + static_cast<int64_t>(kd_off);
   if (entry_off < 0 || static_cast<uint64_t>(entry_off) >= image.size())
