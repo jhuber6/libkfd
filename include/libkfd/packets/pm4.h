@@ -966,53 +966,6 @@ inline uint32_t indirect_buffer(uint32_t *out, const void *ib_addr,
   return INDIRECT_BUFFER_DWORDS;
 }
 
-// COND_INDIRECT_BUFFER - execute an IB only if a memory comparison holds.
-// Shares opcode 0x3F with INDIRECT_BUFFER; the CP disambiguates on the count.
-//
-// Packet layout (14 dwords, count = 12):
-//   [0]     header       - opcode 0x3F, count = 12
-//   [1]     control      - mode[1:0] (1 = compare), function[10:8]
-//   [2-3]   compare_addr - 64-bit poll byte address (8-byte aligned)
-//   [4-5]   mask         - 64-bit mask applied before comparison
-//   [6-7]   reference    - 64-bit value compared against
-//   [8-9]   ib_base      - IB run when the comparison passes
-//   [10]    ib_ctl       - ib size[19:0], cache_policy[29:28]
-//   [11-13] reserved     - second IB slot; unused in mode 1 (see NOTE)
-//
-// The CP evaluates (compare[addr] & mask) <cond> reference; if it holds the IB
-// executes, otherwise the CP falls through to the next packet. cond reuses the
-// WAIT_REG_MEM condition encoding.
-//
-// NOTE: verified on silicon (tests/device/conditional_test.cpp). mode 1 is a
-// single conditional IB - the false path falls through, it does not run a
-// second IB. The trailing dwords are the two-way form's fail-IB slot, zeroed
-// here; the packet is still 14 dwords so they must be present.
-//
-// References: PACKET3_COND_INDIRECT_BUFFER in amdgpu/nvd.h, gfx_v12_1_pkt.h
-inline constexpr uint32_t COND_INDIRECT_BUFFER_DWORDS = 14;
-
-inline uint32_t cond_indirect_buffer(uint32_t *out, Condition cond,
-                                     const void *compare_addr, uint64_t mask,
-                                     uint64_t reference, const void *ib_addr,
-                                     uint32_t ib_dwords,
-                                     CachePolicy policy = POLICY_LRU) {
-  out[0] = header(Opcode::INDIRECT_BUFFER, 12);
-  out[1] = 1u | (static_cast<uint32_t>(cond) << 8); // mode = 1, function[10:8]
-  out[2] = detail::lo(reinterpret_cast<uintptr_t>(compare_addr)) & ~0x7u;
-  out[3] = detail::hi(reinterpret_cast<uintptr_t>(compare_addr));
-  out[4] = detail::lo(mask);
-  out[5] = detail::hi(mask);
-  out[6] = detail::lo(reference);
-  out[7] = detail::hi(reference);
-  out[8] = detail::lo(reinterpret_cast<uintptr_t>(ib_addr)) & ~0x3u;
-  out[9] = detail::hi(reinterpret_cast<uintptr_t>(ib_addr));
-  out[10] = (ib_dwords & 0xFFFFFu) | (static_cast<uint32_t>(policy) << 28);
-  out[11] = 0;
-  out[12] = 0;
-  out[13] = 0;
-  return COND_INDIRECT_BUFFER_DWORDS;
-}
-
 // COND_EXEC - conditionally execute the following packets based on a boolean.
 //
 // Packet layout (5 dwords):
