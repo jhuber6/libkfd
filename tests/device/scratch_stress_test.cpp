@@ -5,8 +5,10 @@
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <random>
 #include <thread>
 #include <vector>
 
@@ -331,6 +333,124 @@ TEST_CASE("Scratch stress - interleaved scratch and non-scratch",
             sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
 
         check_verify_scratch_output(out.data());
+      }
+    }
+  }
+}
+
+TEST_CASE("Scratch stress - concurrent shuffled resize on shared queue",
+          "[device][scratch]") {
+  auto &ctx = require_ctx();
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = require_gpu(ctx, di);
+      auto fix = make_device_fixture(gpu, dispatch_kernels);
+      if (!fix && fix.error().code == ENOEXEC)
+        SKIP(kfd::strerror(fix));
+      REQUIRE_RESULT(fix);
+
+      auto kernel = fix->exe.kernel("verify_scratch.kd");
+      REQUIRE_RESULT(kernel);
+
+      constexpr unsigned NUM_THREADS = 8;
+      constexpr unsigned ROUNDS = 24;
+      constexpr uint32_t SCRATCH_UNIT = 512;
+      constexpr size_t out_bytes = VERIFY_THREADS * sizeof(unsigned);
+      size_t aligned_out =
+          kfd::detail::align_up(out_bytes, kfd::detail::page_size());
+
+      struct Args {
+        unsigned *out;
+      };
+
+      std::vector<kfd::Buffer> outputs;
+      std::vector<kfd::Buffer> kernargs;
+      std::vector<kfd::Signal> signals;
+      outputs.reserve(NUM_THREADS);
+      kernargs.reserve(NUM_THREADS);
+      signals.reserve(NUM_THREADS);
+      for (unsigned t = 0; t < NUM_THREADS; ++t) {
+        outputs.push_back(alloc_host_buffer(*fix->gpu, aligned_out));
+        auto ka = kernel->alloc();
+        REQUIRE_RESULT(ka);
+        kernargs.push_back(std::move(*ka));
+        auto sig = kfd::Signal::create(ctx);
+        REQUIRE_RESULT(sig);
+        signals.push_back(std::move(*sig));
+      }
+
+      struct ThreadResult {
+        unsigned errors = 0;
+        unsigned mismatches = 0;
+        int first_errno = 0;
+      };
+      std::vector<ThreadResult> results(NUM_THREADS);
+
+      std::vector<std::thread> threads;
+      threads.reserve(NUM_THREADS);
+      for (unsigned t = 0; t < NUM_THREADS; ++t) {
+        threads.emplace_back([&, t] {
+          std::mt19937 rng(0xC0FFEE ^ (t * 2654435761u));
+          std::uniform_int_distribution<uint32_t> size_dist(1, NUM_THREADS);
+          std::uniform_int_distribution<int> jitter_us(0, 300);
+          for (unsigned r = 0; r < ROUNDS; ++r) {
+            uint32_t pss = size_dist(rng) * SCRATCH_UNIT;
+            std::this_thread::sleep_for(
+                std::chrono::microseconds(jitter_us(rng)));
+
+            std::memset(outputs[t].data(), 0xFF, out_bytes);
+            Args args{static_cast<unsigned *>(outputs[t].data())};
+            kfd::DispatchConfig cfg{
+                .grid = {.x = 1},
+                .block = {.x = VERIFY_THREADS},
+                .private_segment_size = pss,
+            };
+            kernel->fill(kernargs[t], args, cfg);
+
+            if (auto rs = signals[t].reset(); !rs) {
+              if (!results[t].first_errno)
+                results[t].first_errno = rs.error().code;
+              ++results[t].errors;
+              return;
+            }
+
+            auto res = fix->compute.command()
+                           .dispatch(*kernel, cfg, kernargs[t])
+                           .signal(signals[t])
+                           .submit();
+            if (!res) {
+              if (!results[t].first_errno)
+                results[t].first_errno = res.error().code;
+              ++results[t].errors;
+              return;
+            }
+            auto w = signals[t].wait(kfd::Condition::EQ, 0,
+                                     kfd::test::WAIT_TIMEOUT_NS);
+            if (!w) {
+              if (!results[t].first_errno)
+                results[t].first_errno = w.error().code;
+              ++results[t].errors;
+              return;
+            }
+
+            auto *vals = static_cast<const unsigned *>(outputs[t].data());
+            for (uint32_t i = 0; i < VERIFY_THREADS; ++i) {
+              if (vals[i] != 16 * i + 120) {
+                ++results[t].mismatches;
+                break;
+              }
+            }
+          }
+        });
+      }
+
+      for (auto &th : threads)
+        th.join();
+
+      for (unsigned t = 0; t < NUM_THREADS; ++t) {
+        INFO("thread " << t << " errno=" << results[t].first_errno);
+        CHECK(results[t].errors == 0);
+        CHECK(results[t].mismatches == 0);
       }
     }
   }

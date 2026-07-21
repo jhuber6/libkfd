@@ -130,8 +130,20 @@ kernel.fill(kernarg, my_args, cfg);
 
 // Dispatch and wait for completion.
 auto sig = KFD_EXPECT(kfd::Signal::create(ctx));
-KFD_EXPECT(compute.dispatch(kernel, cfg, kernarg, sig));
+KFD_EXPECT(compute.command().dispatch(kernel, cfg, kernarg).signal(sig).submit());
 KFD_EXPECT(sig.wait(kfd::Condition::EQ, 0, UINT64_MAX));
+```
+
+The interface supports batching packets to avoid MMIO overhead and thread-safe
+ordering as well.
+
+```cpp
+auto cmd = compute.command();
+cmd.write_data(flag, 1)
+   .dispatch(kernel, cfg, kernarg)
+   .signal(sig);
+KFD_EXPECT(cmd.submit());   // atomic batch
+KFD_EXPECT(cmd.submit());   // replay
 ```
 
 Error handling uses `std::expected<T, kfd::Error>`, which wraps around standard

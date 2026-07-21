@@ -192,8 +192,10 @@ int main(int argc, char **argv) {
     std::memcpy(fbs[current].kernarg.data(), &args, sizeof(args));
 
     KFD_EXPECT(fbs[current].signal->reset());
-    KFD_EXPECT(compute.dispatch(kernel, cfg, fbs[current].kernarg,
-                                *fbs[current].signal));
+    KFD_EXPECT(compute.command()
+                   .dispatch(kernel, cfg, fbs[current].kernarg)
+                   .signal(*fbs[current].signal)
+                   .submit());
     KFD_EXPECT(fbs[current].signal->wait(kfd::Condition::EQ, 0, UINT64_MAX));
 
     win->present(current);

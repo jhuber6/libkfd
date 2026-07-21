@@ -97,6 +97,9 @@ private:
     uint64_t err_payload;
     uint64_t scratch_cur;
     uint64_t scratch_guard;
+    uint32_t scratch_req_perwave;
+    uint32_t scratch_req_block;
+    uint32_t scratch_req_props;
     uint32_t indirect[MAX_SCRATCH_IB_DWORDS];
   };
 
@@ -123,7 +126,7 @@ private:
   static bool queue_error_handler(void *user_data);
   static bool scratch_handler(void *user_data);
   static bool scratch_grow(ScratchCtx *sctx, uint32_t needed_perwave,
-                           Dim3 block);
+                           uint32_t threads_per_group);
 
   QueueType type{};
   Context *ctx = nullptr;
@@ -161,64 +164,211 @@ public:
   ComputeQueue(ComputeQueue &&) = default;
   ComputeQueue &operator=(ComputeQueue &&) = default;
 
+  class CommandBuffer {
+  public:
+    CommandBuffer(const CommandBuffer &) = delete;
+    CommandBuffer &operator=(const CommandBuffer &) = delete;
+    CommandBuffer(CommandBuffer &&) = default;
+
+    CommandBuffer &write_data(void *addr, uint32_t value) {
+      uint32_t buf[pm4::WRITE_DATA_DWORDS];
+      pm4::write_data(buf, addr, value);
+      return append(buf, pm4::WRITE_DATA_DWORDS);
+    }
+
+    CommandBuffer &dma_copy(void *dst, const void *src, uint32_t byte_count) {
+      const uint32_t max = queue.gfx_version() >= abi::GFX_VERSION_GFX10_1
+                               ? pm4::DMA_DATA_MAX_BYTES_GFX10
+                               : pm4::DMA_DATA_MAX_BYTES_GFX9;
+      auto *d = static_cast<std::byte *>(dst);
+      auto *s = static_cast<const std::byte *>(src);
+      uint32_t remaining = byte_count;
+      while (remaining) {
+        uint32_t chunk = remaining < max ? remaining : max;
+        uint32_t buf[pm4::DMA_DATA_DWORDS];
+        pm4::dma_data_copy(buf, d, s, chunk);
+        append(buf, pm4::DMA_DATA_DWORDS);
+        d += chunk;
+        s += chunk;
+        remaining -= chunk;
+      }
+      return *this;
+    }
+
+    CommandBuffer &dma_fill(void *dst, uint32_t value, uint32_t byte_count) {
+      const uint32_t max = queue.gfx_version() >= abi::GFX_VERSION_GFX10_1
+                               ? pm4::DMA_DATA_MAX_BYTES_GFX10
+                               : pm4::DMA_DATA_MAX_BYTES_GFX9;
+      auto *d = static_cast<std::byte *>(dst);
+      uint32_t remaining = byte_count;
+      while (remaining) {
+        uint32_t chunk = remaining < max ? remaining : max;
+        uint32_t buf[pm4::DMA_DATA_DWORDS];
+        pm4::dma_data_fill(buf, d, value, chunk);
+        append(buf, pm4::DMA_DATA_DWORDS);
+        d += chunk;
+        remaining -= chunk;
+      }
+      return *this;
+    }
+
+    // The end-of-pipe fence slot is reset first so the wait is never satisfied
+    // by a stale value when the batch is replayed.
+    CommandBuffer &signal(Signal &sig) {
+      uint32_t gfx = queue.gfx_version();
+      void *eop = queue.eop_seq.data();
+      uint32_t buf[pm4::WRITE_DATA_DWORDS + 2 * pm4::RELEASE_MEM_DWORDS +
+                   pm4::WAIT_REG_MEM_DWORDS + pm4::ATOMIC_MEM_DWORDS];
+      uint32_t n = 0;
+      n += pm4::write_data(buf + n, eop, 0);
+      n += pm4::release_mem(buf + n, gfx, eop, uint64_t(1));
+      n += pm4::wait_reg_mem(buf + n, gfx, eop, Condition::GTE, 1);
+      n += pm4::atomic_mem(buf + n, pm4::ATOMIC_ADD_RTN_32, sig.fence_addr(),
+                           int64_t(-1), 0, pm4::ATOMIC_SINGLE_PASS,
+                           pm4::POLICY_BYPASS);
+      n += pm4::release_mem(buf + n, gfx, sig.signal_addr(), sig.event_id(),
+                            sig.trigger_data());
+      return append(buf, n);
+    }
+
+    CommandBuffer &wait(Signal &sig, Condition cond, uint32_t value) {
+      uint32_t buf[pm4::WAIT_REG_MEM_DWORDS];
+      pm4::wait_reg_mem(buf, queue.gfx_version(), sig.fence_addr(), cond,
+                        value);
+      return append(buf, pm4::WAIT_REG_MEM_DWORDS);
+    }
+
+    CommandBuffer &release_mem(pm4::ReleaseMemFlags flush = pm4::REL_ALL,
+                               void *addr = nullptr, uint64_t value = 0,
+                               Event *event = nullptr) {
+      uint32_t gfx = queue.gfx_version();
+      uint32_t buf[2 * pm4::RELEASE_MEM_DWORDS];
+      uint32_t n = 0;
+
+      // Fence write, or a plain flush-only barrier when no extr arguments
+      // given..
+      if (addr || !event)
+        n += pm4::release_mem(buf, pm4::eop_flush(gfx, flush),
+                              addr ? pm4::DATA_64 : pm4::DATA_NONE,
+                              pm4::INT_NONE, addr, value);
+
+      // Fire the event in a second packet by writing to the signal page
+      // address.
+      if (event)
+        n += pm4::release_mem(
+            buf + n, pm4::eop_flush(gfx, n ? pm4::ReleaseMemFlags(0) : flush),
+            pm4::DATA_64, pm4::INT_DATA_CONFIRM, event->signal_addr(),
+            event->event_id(), event->trigger_data());
+
+      return append(buf, n);
+    }
+
+    CommandBuffer &acquire_mem(pm4::AcquireMemFlags flags = pm4::ACQ_ALL,
+                               const void *range_base = nullptr,
+                               uint64_t range_size = UINT64_MAX) {
+      uint32_t buf[pm4::ACQUIRE_MEM_DWORDS];
+      auto n =
+          pm4::acquire_mem(buf, queue.gfx_version(), flags,
+                           reinterpret_cast<uint64_t>(range_base), range_size);
+      return append(buf, n);
+    }
+
+    CommandBuffer &wait_reg_mem(void *addr, Condition cond, uint32_t reference,
+                                uint32_t mask = 0xFFFFFFFF) {
+      uint32_t buf[pm4::WAIT_REG_MEM_DWORDS];
+      pm4::wait_reg_mem(buf, queue.gfx_version(), addr, cond, reference, mask);
+      return append(buf, pm4::WAIT_REG_MEM_DWORDS);
+    }
+
+    CommandBuffer &indirect_buffer(const void *ib_addr,
+                                   uint32_t ib_size_dwords) {
+      uint32_t buf[pm4::INDIRECT_BUFFER_DWORDS];
+      pm4::indirect_buffer(buf, ib_addr, ib_size_dwords);
+      return append(buf, pm4::INDIRECT_BUFFER_DWORDS);
+    }
+
+    CommandBuffer &
+    atomic_mem(pm4::AtomicOp op, void *addr, int64_t src_data,
+               int64_t cmp_data = 0,
+               pm4::AtomicCommand cmd = pm4::ATOMIC_SINGLE_PASS) {
+      uint32_t buf[pm4::ATOMIC_MEM_DWORDS];
+      pm4::atomic_mem(buf, op, addr, src_data, cmp_data, cmd);
+      return append(buf, pm4::ATOMIC_MEM_DWORDS);
+    }
+
+    CommandBuffer &copy_data(pm4::CopyDataSrcSel src_sel, uint64_t src_addr,
+                             pm4::CopyDataDstSel dst_sel, uint64_t dst_addr,
+                             bool count_64 = false, bool wr_confirm = true,
+                             pm4::CachePolicy src_policy = pm4::POLICY_LRU,
+                             pm4::CachePolicy dst_policy = pm4::POLICY_LRU) {
+      uint32_t buf[pm4::COPY_DATA_DWORDS];
+      pm4::copy_data(buf, src_sel, src_addr, dst_sel, dst_addr, count_64,
+                     wr_confirm, src_policy, dst_policy);
+      return append(buf, pm4::COPY_DATA_DWORDS);
+    }
+
+    CommandBuffer &read_gpu_clock(void *dst) {
+      uint32_t buf[pm4::COPY_DATA_DWORDS];
+      pm4::copy_data_gpu_clock(buf, dst);
+      return append(buf, pm4::COPY_DATA_DWORDS);
+    }
+
+    CommandBuffer &dispatch(const Kernel &kernel, const DispatchConfig &cfg,
+                            const Buffer &kernarg) {
+      uint32_t buf[DISPATCH_DWORDS];
+      return append(buf, queue.dispatch_impl(buf, kernel, cfg, kernarg));
+    }
+
+    std::expected<void, Error> submit() {
+      return queue.flush(words.data(), words.size());
+    }
+
+    void reset() { words.clear(); }
+    size_t size() const { return words.size(); }
+    bool empty() const { return words.empty(); }
+
+  private:
+    friend class ComputeQueue;
+
+    explicit CommandBuffer(ComputeQueue &queue) : queue(queue) {}
+
+    CommandBuffer &append(const uint32_t *data, uint32_t n) {
+      size_t old = words.size();
+      KFD_ASSERT(words.resize(old + n));
+      std::memcpy(words.data() + old, data,
+                  static_cast<size_t>(n) * sizeof(uint32_t));
+      return *this;
+    }
+
+    ComputeQueue &queue;
+    detail::SmallVector<uint32_t, 256> words;
+  };
+
+  CommandBuffer command() { return CommandBuffer(*this); }
+
   std::expected<void, Error> write_data(void *addr, uint32_t value) {
-    uint32_t buf[pm4::WRITE_DATA_DWORDS];
-    pm4::write_data(buf, addr, value);
-    return base.submit(buf, pm4::WRITE_DATA_DWORDS);
+    return command().write_data(addr, value).submit();
   }
 
   std::expected<void, Error> dma_copy(void *dst, const void *src,
                                       uint32_t byte_count) {
-    const uint32_t max = base.dev->gfx_version() >= abi::GFX_VERSION_GFX10_1
-                             ? pm4::DMA_DATA_MAX_BYTES_GFX10
-                             : pm4::DMA_DATA_MAX_BYTES_GFX9;
-    auto *d = static_cast<std::byte *>(dst);
-    auto *s = static_cast<const std::byte *>(src);
-    uint32_t remaining = byte_count;
-    while (remaining) {
-      uint32_t chunk = remaining < max ? remaining : max;
-      uint32_t buf[pm4::DMA_DATA_DWORDS];
-      pm4::dma_data_copy(buf, d, s, chunk);
-      KFD_CHECK(base.submit(buf, pm4::DMA_DATA_DWORDS));
-      d += chunk;
-      s += chunk;
-      remaining -= chunk;
-    }
-    return {};
+    return command().dma_copy(dst, src, byte_count).submit();
   }
 
   std::expected<void, Error> dma_fill(void *dst, uint32_t value,
                                       uint32_t byte_count) {
-    const uint32_t max = base.dev->gfx_version() >= abi::GFX_VERSION_GFX10_1
-                             ? pm4::DMA_DATA_MAX_BYTES_GFX10
-                             : pm4::DMA_DATA_MAX_BYTES_GFX9;
-    auto *d = static_cast<std::byte *>(dst);
-    uint32_t remaining = byte_count;
-    while (remaining) {
-      uint32_t chunk = remaining < max ? remaining : max;
-      uint32_t buf[pm4::DMA_DATA_DWORDS];
-      pm4::dma_data_fill(buf, d, value, chunk);
-      KFD_CHECK(base.submit(buf, pm4::DMA_DATA_DWORDS));
-      d += chunk;
-      remaining -= chunk;
-    }
-    return {};
+    return command().dma_fill(dst, value, byte_count).submit();
   }
 
   // Decrements the signal's value and fires an event once the preceding work
   // has finished.
   std::expected<void, Error> signal(Signal &sig) {
-    uint32_t buf[SIGNAL_DWORDS];
-    uint32_t n = signal(buf, sig);
-    return base.submit(buf, n);
+    return command().signal(sig).submit();
   }
 
   // Stalls the CP until the signal's value satisfies the condition.
   std::expected<void, Error> wait(Signal &sig, Condition cond, uint32_t value) {
-    uint32_t buf[pm4::WAIT_REG_MEM_DWORDS];
-    pm4::wait_reg_mem(buf, base.dev->gfx_version(), sig.fence_addr(), cond,
-                      value);
-    return base.submit(buf, pm4::WAIT_REG_MEM_DWORDS);
+    return command().wait(sig, cond, value).submit();
   }
 
   // Invalidates the selected caches on the command buffer's end-of-pipe flush.
@@ -227,24 +377,7 @@ public:
   std::expected<void, Error>
   release_mem(pm4::ReleaseMemFlags flush = pm4::REL_ALL, void *addr = nullptr,
               uint64_t value = 0, Event *event = nullptr) {
-    uint32_t gfx = base.dev->gfx_version();
-    uint32_t buf[2 * pm4::RELEASE_MEM_DWORDS];
-    uint32_t n = 0;
-
-    // Fence write, or a plain flush-only barrier when no extr arguments given..
-    if (addr || !event)
-      n += pm4::release_mem(buf, pm4::eop_flush(gfx, flush),
-                            addr ? pm4::DATA_64 : pm4::DATA_NONE, pm4::INT_NONE,
-                            addr, value);
-
-    // Fire the event in a second packet by writing to the signal page address.
-    if (event)
-      n += pm4::release_mem(
-          buf + n, pm4::eop_flush(gfx, n ? pm4::ReleaseMemFlags(0) : flush),
-          pm4::DATA_64, pm4::INT_DATA_CONFIRM, event->signal_addr(),
-          event->event_id(), event->trigger_data());
-
-    return base.submit(buf, n);
+    return command().release_mem(flush, addr, value, event).submit();
   }
 
   // Invalidates the selected caches over the given range. This is required to
@@ -253,36 +386,25 @@ public:
   acquire_mem(pm4::AcquireMemFlags flags = pm4::ACQ_ALL,
               const void *range_base = nullptr,
               uint64_t range_size = UINT64_MAX) {
-    uint32_t buf[pm4::ACQUIRE_MEM_DWORDS];
-    auto n =
-        pm4::acquire_mem(buf, base.dev->gfx_version(), flags,
-                         reinterpret_cast<uint64_t>(range_base), range_size);
-    return base.submit(buf, n);
+    return command().acquire_mem(flags, range_base, range_size).submit();
   }
 
   std::expected<void, Error> wait_reg_mem(void *addr, Condition cond,
                                           uint32_t reference,
                                           uint32_t mask = 0xFFFFFFFF) {
-    uint32_t buf[pm4::WAIT_REG_MEM_DWORDS];
-    pm4::wait_reg_mem(buf, base.dev->gfx_version(), addr, cond, reference,
-                      mask);
-    return base.submit(buf, pm4::WAIT_REG_MEM_DWORDS);
+    return command().wait_reg_mem(addr, cond, reference, mask).submit();
   }
 
   std::expected<void, Error> indirect_buffer(const void *ib_addr,
                                              uint32_t ib_size_dwords) {
-    uint32_t buf[pm4::INDIRECT_BUFFER_DWORDS];
-    pm4::indirect_buffer(buf, ib_addr, ib_size_dwords);
-    return base.submit(buf, pm4::INDIRECT_BUFFER_DWORDS);
+    return command().indirect_buffer(ib_addr, ib_size_dwords).submit();
   }
 
   std::expected<void, Error>
   atomic_mem(pm4::AtomicOp op, void *addr, int64_t src_data,
              int64_t cmp_data = 0,
              pm4::AtomicCommand cmd = pm4::ATOMIC_SINGLE_PASS) {
-    uint32_t buf[pm4::ATOMIC_MEM_DWORDS];
-    pm4::atomic_mem(buf, op, addr, src_data, cmp_data, cmd);
-    return base.submit(buf, pm4::ATOMIC_MEM_DWORDS);
+    return command().atomic_mem(op, addr, src_data, cmp_data, cmd).submit();
   }
 
   std::expected<void, Error>
@@ -291,32 +413,22 @@ public:
             bool count_64 = false, bool wr_confirm = true,
             pm4::CachePolicy src_policy = pm4::POLICY_LRU,
             pm4::CachePolicy dst_policy = pm4::POLICY_LRU) {
-    uint32_t buf[pm4::COPY_DATA_DWORDS];
-    pm4::copy_data(buf, src_sel, src_addr, dst_sel, dst_addr, count_64,
-                   wr_confirm, src_policy, dst_policy);
-    return base.submit(buf, pm4::COPY_DATA_DWORDS);
+    return command()
+        .copy_data(src_sel, src_addr, dst_sel, dst_addr, count_64, wr_confirm,
+                   src_policy, dst_policy)
+        .submit();
   }
 
   // Snapshot the GPU's free-running clock counter to an 8-byte-aligned address.
   std::expected<void, Error> read_gpu_clock(void *dst) {
-    uint32_t buf[pm4::COPY_DATA_DWORDS];
-    pm4::copy_data_gpu_clock(buf, dst);
-    return base.submit(buf, pm4::COPY_DATA_DWORDS);
+    return command().read_gpu_clock(dst).submit();
   }
 
   // Dispatches a kernel launch onto the queue.
   std::expected<void, Error> dispatch(const Kernel &kernel,
                                       const DispatchConfig &cfg,
                                       const Buffer &kernarg) {
-    return dispatch(kernel, cfg, kernarg, /*completion=*/nullptr);
-  }
-
-  // Variant that submits a completion signal.
-  std::expected<void, Error> dispatch(const Kernel &kernel,
-                                      const DispatchConfig &cfg,
-                                      const Buffer &kernarg,
-                                      Signal &completion) {
-    return dispatch(kernel, cfg, kernarg, &completion);
+    return command().dispatch(kernel, cfg, kernarg).submit();
   }
 
   // Sets the bitfield controlling with CUs workgroups can be dispatched to.
@@ -335,39 +447,25 @@ private:
   friend class Context;
   friend class CooperativeQueue;
 
-  static constexpr uint32_t SIGNAL_DWORDS =
-      pm4::RELEASE_MEM_DWORDS + pm4::WAIT_REG_MEM_DWORDS +
-      pm4::ATOMIC_MEM_DWORDS + pm4::RELEASE_MEM_DWORDS;
+  static constexpr uint32_t SCRATCH_GUARD_DWORDS =
+      pm4::WRITE_DATA_DWORDS + pm4::COND_WRITE_DWORDS + pm4::COND_EXEC_DWORDS +
+      /*in-band request=*/3 * pm4::WRITE_DATA_DWORDS + pm4::RELEASE_MEM_DWORDS +
+      pm4::WAIT_REG_MEM_DWORDS + pm4::INDIRECT_BUFFER_DWORDS;
 
-  std::expected<void, Error> dispatch(const Kernel &kernel,
-                                      const DispatchConfig &cfg,
-                                      const Buffer &kernarg,
-                                      Signal *completion);
+  static constexpr uint32_t DISPATCH_DWORDS =
+      pm4::ACQUIRE_MEM_DWORDS + pm4::MAX_DISPATCH_DWORDS +
+      SCRATCH_GUARD_DWORDS + pm4::DISPATCH_DIRECT_DWORDS;
 
-  // We use a RELEASE_MEM packet with the sequence counter and cache-bypass to
-  // wait until the necessary work and cache invalidation has completed. Then
-  // we decrement the signal value and fire an event.
-  uint32_t signal(uint32_t *buf, Signal &sig) {
-    uint32_t seq = __atomic_fetch_add(&next_eop_seq, 1, __ATOMIC_RELAXED) + 1;
-    uint32_t gfx = base.dev->gfx_version();
-    uint32_t n = 0;
-    n += pm4::release_mem(buf + n, gfx, eop_seq.data(),
-                          static_cast<uint64_t>(seq));
-    n += pm4::wait_reg_mem(buf + n, gfx, eop_seq.data(), Condition::GTE, seq);
-    n += pm4::atomic_mem(buf + n, pm4::ATOMIC_ADD_RTN_32, sig.fence_addr(),
-                         int64_t(-1), 0, pm4::ATOMIC_SINGLE_PASS,
-                         pm4::POLICY_BYPASS);
-    n += pm4::release_mem(buf + n, gfx, sig.signal_addr(), sig.event_id(),
-                          sig.trigger_data());
-    return n;
-  }
+  uint32_t dispatch_impl(uint32_t *out, const Kernel &kernel,
+                         const DispatchConfig &cfg, const Buffer &kernarg);
+
+  std::expected<void, Error> flush(const uint32_t *data, size_t dwords);
 
   explicit ComputeQueue(QueueBase &&b, Buffer &&vram)
       : eop_seq(std::move(vram)), base(std::move(b)) {}
 
   Buffer eop_seq;
   QueueBase base;
-  uint32_t next_eop_seq = 0;
   bool cooperative = false;
   detail::SmallVector<uint32_t, 8> cu_mask_words;
 };

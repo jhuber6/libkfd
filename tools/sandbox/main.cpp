@@ -115,7 +115,8 @@ int main(int argc, char **argv) {
   auto sig = KFD_EXPECT(kfd::Signal::create(ctx));
 
   auto t0 = std::chrono::high_resolution_clock::now();
-  KFD_EXPECT(compute.dispatch(kernel, cfg, kernarg, sig));
+  KFD_EXPECT(
+      compute.command().dispatch(kernel, cfg, kernarg).signal(sig).submit());
   KFD_EXPECT(sig.wait(kfd::Condition::EQ, 0, UINT64_MAX));
   auto t1 = std::chrono::high_resolution_clock::now();
 

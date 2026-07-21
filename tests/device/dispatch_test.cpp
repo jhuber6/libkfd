@@ -370,3 +370,122 @@ TEST_CASE("Dispatch - 3D grid dimensions correct", "[device][dispatch]") {
     }
   }
 }
+
+// Several sub-dispatches recorded into a single command buffer and submitted
+// once must reconstruct a full grid, just like the individually-submitted
+// version but with one lock acquisition and one doorbell ring.
+TEST_CASE("Dispatch - batched grid split in one command buffer",
+          "[device][dispatch][command]") {
+  auto &ctx = require_ctx();
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = require_gpu(ctx, di);
+      auto fix = make_device_fixture(gpu, dispatch_kernels);
+      if (!fix && fix.error().code == ENOEXEC)
+        SKIP(kfd::strerror(fix));
+      REQUIRE_RESULT(fix);
+
+      auto kernel = fix->exe.kernel("grid_memset.kd");
+      REQUIRE_RESULT(kernel);
+
+      constexpr uint32_t NUM_WG = 64;
+      constexpr uint32_t THREADS = 64;
+      constexpr uint32_t CHUNKS = 4;
+      constexpr uint32_t PER = NUM_WG / CHUNKS;
+      constexpr uint32_t N = NUM_WG * THREADS;
+
+      auto out = kfd::test::alloc_host_buffer(
+          *fix->gpu, kfd::detail::align_up(N * sizeof(unsigned),
+                                           kfd::detail::page_size()));
+      auto *vals = static_cast<unsigned *>(out.data());
+      std::memset(vals, 0, N * sizeof(unsigned));
+
+      struct Args {
+        unsigned *out;
+        unsigned tag;
+      };
+      kfd::DispatchConfig full{.grid = {.x = NUM_WG}, .block = {.x = THREADS}};
+
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
+
+      // Record every chunk plus the completion fence into one buffer.
+      std::vector<kfd::Buffer> kernargs;
+      auto cmd = fix->compute.command();
+      for (uint32_t c = 0; c < CHUNKS; ++c) {
+        auto ka = kernel->alloc();
+        REQUIRE_RESULT(ka);
+        Args args{.out = vals, .tag = c + 1};
+        kernel->fill(*ka, args, full);
+        kernargs.push_back(std::move(*ka));
+
+        kfd::DispatchConfig sub = full;
+        sub.grid_start = {.x = c * PER, .y = 0, .z = 0};
+        sub.grid_count = {.x = PER, .y = 0, .z = 0};
+        cmd.dispatch(*kernel, sub, kernargs.back());
+      }
+      cmd.signal(*sig);
+      REQUIRE_RESULT(cmd.submit());
+
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+
+      unsigned mismatches = 0;
+      for (uint32_t i = 0; i < N; ++i) {
+        unsigned expected = i / THREADS / PER + 1;
+        if (vals[i] != expected)
+          ++mismatches;
+      }
+      CHECK(mismatches == 0);
+    }
+  }
+}
+
+// A recorded dispatch may be replayed: submitting the same command buffer again
+// re-runs the kernel and re-stamps the completion fence.
+TEST_CASE("Dispatch - command buffer replays a launch",
+          "[device][dispatch][command]") {
+  auto &ctx = require_ctx();
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = require_gpu(ctx, di);
+      auto fix = make_device_fixture(gpu, dispatch_kernels);
+      if (!fix && fix.error().code == ENOEXEC)
+        SKIP(kfd::strerror(fix));
+      REQUIRE_RESULT(fix);
+
+      auto kernel = fix->exe.kernel("store.kd");
+      REQUIRE_RESULT(kernel);
+
+      auto out = kfd::test::alloc_host_buffer(*fix->gpu);
+
+      struct Args {
+        unsigned *out;
+      };
+      Args args{.out = static_cast<unsigned *>(out.data())};
+
+      kfd::DispatchConfig cfg{.grid = {.x = 1}, .block = {.x = 64}};
+      auto kernarg = kernel->alloc();
+      REQUIRE_RESULT(kernarg);
+      kernel->fill(*kernarg, args, cfg);
+
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
+
+      auto cmd = fix->compute.command();
+      cmd.dispatch(*kernel, cfg, *kernarg).signal(*sig);
+
+      constexpr int REPLAYS = 4;
+      for (int i = 0; i < REPLAYS; ++i) {
+        std::memset(out.data(), 0, sizeof(unsigned));
+        REQUIRE_RESULT(sig->reset());
+        REQUIRE_RESULT(cmd.submit());
+        REQUIRE_RESULT(
+            sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+        unsigned val;
+        std::memcpy(&val, out.data(), sizeof(val));
+        CHECK(val == 0xCAFEBABE);
+      }
+    }
+  }
+}

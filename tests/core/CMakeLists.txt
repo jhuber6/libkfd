@@ -1,3 +1,4 @@
+kfd_add_device_test(command_buffer_test command_buffer_test.cpp)
 kfd_add_device_test(context_test context_test.cpp)
 kfd_add_device_test(event_test event_test.cpp)
 kfd_add_device_test(memory_test memory_test.cpp)

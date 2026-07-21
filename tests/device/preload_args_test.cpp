@@ -49,7 +49,10 @@ TEST_CASE("Dispatch - kernarg preload verifies 16 scalar arguments",
       auto sig = kfd::Signal::create(ctx);
       REQUIRE_RESULT(sig);
 
-      REQUIRE_RESULT(fix->compute.dispatch(*kernel, cfg, *kernarg, *sig));
+      REQUIRE_RESULT(fix->compute.command()
+                         .dispatch(*kernel, cfg, *kernarg)
+                         .signal(*sig)
+                         .submit());
       REQUIRE_RESULT(
           sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
     }

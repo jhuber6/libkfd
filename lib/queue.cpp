@@ -43,20 +43,15 @@ struct ScratchCtx {
   uint64_t *scratch_cur_ptr = nullptr;
   uint32_t *ib_buf = nullptr;
 
+  uint32_t *req_perwave = nullptr;
+  uint32_t *req_block = nullptr;
+  uint32_t *req_props = nullptr;
+
   void *scratch_va = nullptr;
   size_t scratch_size = 0;
   Buffer scratch_bo;
   uint32_t scratch_perwave = 0;
   uint32_t scratch_tmpring = 0;
-
-  // Largest per-wave capacity requested but not yet satisfied, published to the
-  // watcher under mtx. needed_props selects the scratch SGPR layout to install.
-  detail::Mutex mtx;
-  uint32_t needed_perwave = 0;
-  Dim3 needed_block{};
-  uint16_t needed_props = 0;
-
-  int error = 0;
 };
 
 namespace {
@@ -136,9 +131,9 @@ bool QueueBase::queue_error_handler(void *user_data) {
 }
 
 // Grows the backing scratch region to 'needed_perwave' bytes per wave. Returns
-// false and sets sctx->error if no allocation could be made.
+// false if no allocation could be made.
 bool QueueBase::scratch_grow(ScratchCtx *sctx, uint32_t needed_perwave,
-                             Dim3 block) {
+                             uint32_t threads_per_group) {
   void *old_va = sctx->scratch_va;
   if (old_va) {
     sctx->scratch_bo.release_device();
@@ -157,11 +152,8 @@ bool QueueBase::scratch_grow(ScratchCtx *sctx, uint32_t needed_perwave,
   uint32_t num_se = detail::scratch_num_se(*sctx->dev) / dev_num_xcc;
   if (num_se == 0)
     num_se = 1;
-  uint32_t waves_per_group = detail::max(
-      static_cast<uint32_t>(
-          (static_cast<uint64_t>(block.x) * block.y * block.z + lanes - 1) /
-          lanes),
-      1u);
+  uint32_t waves_per_group =
+      detail::max((threads_per_group + lanes - 1) / lanes, 1u);
   uint32_t min_slots = 2 * num_se;
 
   // Try to allocate scratch for the requested slots, shrinking the slot count
@@ -200,7 +192,6 @@ bool QueueBase::scratch_grow(ScratchCtx *sctx, uint32_t needed_perwave,
     return true;
   }
 
-  __atomic_store_n(&sctx->error, ENOMEM, __ATOMIC_RELAXED);
   return false;
 }
 
@@ -210,28 +201,20 @@ bool QueueBase::scratch_grow(ScratchCtx *sctx, uint32_t needed_perwave,
 bool QueueBase::scratch_handler(void *user_data) {
   auto *sctx = static_cast<ScratchCtx *>(user_data);
 
-  uint32_t needed_perwave;
-  Dim3 block;
-  uint16_t props;
-  {
-    detail::LockGuard guard(sctx->mtx);
-    needed_perwave = sctx->needed_perwave;
-    block = sctx->needed_block;
-    props = sctx->needed_props;
-  }
+  uint32_t needed_perwave =
+      __atomic_load_n(sctx->req_perwave, __ATOMIC_ACQUIRE);
+  uint32_t threads_per_group =
+      __atomic_load_n(sctx->req_block, __ATOMIC_RELAXED);
+  uint16_t props =
+      static_cast<uint16_t>(__atomic_load_n(sctx->req_props, __ATOMIC_RELAXED));
   if (needed_perwave == 0)
     return true;
 
   if (needed_perwave > sctx->scratch_perwave &&
-      !scratch_grow(sctx, needed_perwave, block)) {
-    // Allocation failed: unblock the CP with a NOP IB and surface the error on
-    // the next dispatch.
-    sctx->ib_buf[0] = pm4::header(
-        pm4::Opcode::NOP,
-        static_cast<uint16_t>(QueueBase::MAX_SCRATCH_IB_DWORDS - 2));
-    __atomic_store_n(sctx->scratch_cur_ptr, uint64_t(needed_perwave),
-                     __ATOMIC_RELEASE);
-    return true;
+      !scratch_grow(sctx, needed_perwave, threads_per_group)) {
+    // FIXME: Needs a more graceful error handling method for this.
+    std::fprintf(stderr, "libkfd: scratch allocation failed\n");
+    std::abort();
   }
 
   // Build the indirect buffer with the current scratch state. The GPU executes
@@ -434,6 +417,9 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
     auto *sctx = q.scratch_watch_ctx.get();
     sctx->dev = &dev;
     sctx->scratch_cur_ptr = &ctl->scratch_cur;
+    sctx->req_perwave = &ctl->scratch_req_perwave;
+    sctx->req_block = &ctl->scratch_req_block;
+    sctx->req_props = &ctl->scratch_req_props;
     sctx->ib_buf = ctl->indirect;
     sctx->ib_buf[0] = pm4::header(
         pm4::Opcode::NOP,
@@ -656,26 +642,15 @@ ComputeQueue::create(Device &dev, size_t ring_size, uint32_t target_xcc) {
   return q;
 }
 
-// Dispatch a kernel launch. If the dispatch needs scratch we emit additional
-// packets to drain the queue and update the base scratch registers. Every
-// dispatch shares the programmed base registers and are only set on scratch
-// reallocation.
-std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
-                                                  const DispatchConfig &cfg,
-                                                  const Buffer &kernarg,
-                                                  Signal *completion) {
+// Records a kernel launch. If the dispatch needs scratch we emit additional
+// packets to drain the queue and update the base scratch registers, publishing
+// the request to the watcher thread. Every dispatch shares the programmed base
+// registers and are only set on scratch reallocation.
+uint32_t ComputeQueue::dispatch_impl(uint32_t *out, const Kernel &kernel,
+                                     const DispatchConfig &cfg,
+                                     const Buffer &kernarg) {
   const abi::KernelDescriptor &kd = kernel.descriptor();
-
-  if (cooperative) {
-    const auto &p = base.dev->properties();
-    uint32_t simd_per_cu = p.simd_per_cu ? p.simd_per_cu : 1;
-    uint32_t num_cus = p.simd_count / simd_per_cu;
-    uint32_t cus_needed = abi::occupancy(p, base.dev->gfx_version(), kd, cfg);
-    if (cus_needed > num_cus)
-      return kfd::unexpected(
-          EINVAL, "cooperative launch needs %u CUs but device has %u",
-          cus_needed, num_cus);
-  }
+  uint32_t gfx = base.dev->gfx_version();
 
   uint32_t private_segment_size = cfg.private_segment_size;
   if (!(kd.kernel_code_properties & abi::USES_DYNAMIC_STACK))
@@ -683,32 +658,16 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
   else if (!private_segment_size)
     private_segment_size = /*8 KiB=*/8 * 1024;
 
-  detail::LockGuard guard(base.submit_mtx);
-
   auto *sctx = base.scratch_watch_ctx.get();
-  if (__atomic_load_n(&sctx->error, __ATOMIC_RELAXED))
-    return kfd::unexpected(sctx->error, "scratch allocation failed");
-
   uint16_t props = kd.kernel_code_properties;
-  uint32_t gfx = base.dev->gfx_version();
 
   uint32_t per_wave = static_cast<uint32_t>(detail::align_up(
       size_t(abi::native_wave_size(gfx)) * private_segment_size,
       size_t(detail::scratch_alignment_unit(gfx))));
-  if (per_wave > detail::max_wave_scratch(gfx))
-    return kfd::unexpected(
-        ERANGE, "scratch %u B exceeds hardware per-wave limit (%u B / wave)",
-        private_segment_size, detail::max_wave_scratch(gfx));
 
   bool needs_scratch_allocation =
       private_segment_size > 0 &&
       per_wave > __atomic_load_n(&base.ctl()->scratch_cur, __ATOMIC_ACQUIRE);
-  if (needs_scratch_allocation) {
-    detail::LockGuard request_guard(sctx->mtx);
-    sctx->needed_perwave = detail::max(per_wave, sctx->needed_perwave);
-    sctx->needed_block = cfg.block;
-    sctx->needed_props = props;
-  }
 
   const void *dispatch_pkt_addr = nullptr;
   if (kd.kernel_code_properties & abi::ENABLE_SGPR_DISPATCH_PTR)
@@ -716,18 +675,10 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
         static_cast<std::byte *>(kernarg.data()) +
         detail::align_up(static_cast<size_t>(kd.kernarg_size), size_t(64));
 
-  constexpr uint32_t SCRATCH_GUARD_DWORDS =
-      pm4::WRITE_DATA_DWORDS + pm4::COND_WRITE_DWORDS + pm4::COND_EXEC_DWORDS +
-      pm4::RELEASE_MEM_DWORDS + pm4::WAIT_REG_MEM_DWORDS +
-      pm4::INDIRECT_BUFFER_DWORDS;
-  uint32_t buf[pm4::ACQUIRE_MEM_DWORDS + pm4::MAX_DISPATCH_DWORDS +
-               SCRATCH_GUARD_DWORDS + pm4::DISPATCH_DIRECT_DWORDS +
-               SIGNAL_DWORDS];
-
   // Invalidate scalar and vector caches (K-cache / GLK V-cache) so the shader
   // reads fresh kernarg data. RELEASE_MEM only flushes L2 and vector L1; the
   // scalar L1 retains stale entries across dispatches to the same kernarg.
-  uint32_t n = pm4::acquire_mem(buf, gfx, pm4::ACQ_KCACHE | pm4::ACQ_VCACHE);
+  uint32_t n = pm4::acquire_mem(out, gfx, pm4::ACQ_KCACHE | pm4::ACQ_VCACHE);
 
   // Resolve the launch sub-range for manual launch grid partitioning. A
   // non-zero origin covers [start, start + count) and reports absolute
@@ -740,45 +691,52 @@ std::expected<void, Error> ComputeQueue::dispatch(const Kernel &kernel,
                 launch_count(cfg.grid_count.y, cfg.grid.y, start.y),
                 launch_count(cfg.grid_count.z, cfg.grid.z, start.z)};
 
-  n += pm4::build_dispatch_setup(buf + n, gfx, kd, kernel.address(), cfg.grid,
+  n += pm4::build_dispatch_setup(out + n, gfx, kd, kernel.address(), cfg.grid,
                                  cfg.block, kernarg.data(), dispatch_pkt_addr,
                                  cfg.dynamic_lds, private_segment_size,
                                  cooperative, start);
 
   // The scratch registers are set once when a reallocation event is triggered.
-  // If a scratch allocation is still needed, we flush the queue and notify the
-  // watcher thread before waiting on its result. The watcher thread performs
-  // the allocation and presents an indirect buffer containing the new scratch
-  // base. If the condition was already fulfilled, we skip past this.
+  // If a scratch allocation is still needed, we publish the request in-band and
+  // notify the watcher thread before waiting on its result. The watcher
+  // performs the allocation and presents an indirect buffer containing the new
+  // scratch base. If the condition was already fulfilled, we skip past this.
   if (needs_scratch_allocation) {
-    constexpr uint32_t HANDSHAKE_DWORDS = pm4::RELEASE_MEM_DWORDS +
-                                          pm4::WAIT_REG_MEM_DWORDS +
-                                          pm4::INDIRECT_BUFFER_DWORDS;
-    uint64_t *scratch_guard = &base.ctl()->scratch_guard;
-    n += pm4::write_data(buf + n, scratch_guard, 1);
-    n += pm4::cond_write(buf + n, Condition::GTE, &base.ctl()->scratch_cur,
-                         per_wave, 0xFFFFFFFF, scratch_guard, 0);
-    n += pm4::cond_exec(buf + n, scratch_guard, HANDSHAKE_DWORDS);
-    n += pm4::release_mem(buf + n, gfx, base.scratch_event->signal_addr(),
+    auto *ctl = base.ctl();
+    constexpr uint32_t HANDSHAKE_DWORDS =
+        /*in-band request=*/3 * pm4::WRITE_DATA_DWORDS +
+        pm4::RELEASE_MEM_DWORDS + pm4::WAIT_REG_MEM_DWORDS +
+        pm4::INDIRECT_BUFFER_DWORDS;
+    uint64_t *scratch_guard = &ctl->scratch_guard;
+    n += pm4::write_data(out + n, scratch_guard, 1);
+    n += pm4::cond_write(out + n, Condition::GTE, &ctl->scratch_cur, per_wave,
+                         0xFFFFFFFF, scratch_guard, 0);
+    n += pm4::cond_exec(out + n, scratch_guard, HANDSHAKE_DWORDS);
+
+    uint32_t threads_per_group = cfg.block.x * cfg.block.y * cfg.block.z;
+    n += pm4::write_data(out + n, &ctl->scratch_req_perwave, per_wave);
+    n += pm4::write_data(out + n, &ctl->scratch_req_block, threads_per_group);
+    n += pm4::write_data(out + n, &ctl->scratch_req_props, props);
+    n += pm4::release_mem(out + n, gfx, base.scratch_event->signal_addr(),
                           base.scratch_event->event_id(),
                           base.scratch_event->trigger_data());
-    n += pm4::wait_reg_mem(buf + n, gfx, &base.ctl()->scratch_cur,
-                           Condition::GTE, per_wave);
-    n += pm4::indirect_buffer(buf + n, sctx->ib_buf,
+    n += pm4::wait_reg_mem(out + n, gfx, &ctl->scratch_cur, Condition::GTE,
+                           per_wave);
+    n += pm4::indirect_buffer(out + n, sctx->ib_buf,
                               QueueBase::MAX_SCRATCH_IB_DWORDS,
                               pm4::CachePolicy::POLICY_BYPASS);
   }
 
   // Push the final dispatch with the full configuration.
   n +=
-      pm4::dispatch_direct(buf + n, start.x + count.x, start.y + count.y,
+      pm4::dispatch_direct(out + n, start.x + count.x, start.y + count.y,
                            start.z + count.z, pm4::dispatch_initiator(kd, gfx));
+  return n;
+}
 
-  // If a completion signal is needed we append it under the queue lock.
-  if (completion)
-    n += signal(buf + n, *completion);
-
-  return base.submit_impl(buf, n);
+std::expected<void, Error> ComputeQueue::flush(const uint32_t *data,
+                                               size_t dwords) {
+  return base.submit(data, dwords);
 }
 
 std::expected<void, Error>

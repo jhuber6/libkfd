@@ -225,7 +225,7 @@ void launch_if_present(kfd::Device &dev, kfd::Executable &exe,
       KFD_EXPECT(kfd::Signal::create(dev.context(), /*initial=*/1));
   kfd::Buffer ka = KFD_EXPECT(kernel->alloc());
   kernel->fill(ka, cfg);
-  KFD_EXPECT(compute.dispatch(*kernel, cfg, ka, sig));
+  KFD_EXPECT(compute.command().dispatch(*kernel, cfg, ka).signal(sig).submit());
   KFD_EXPECT(sig.wait(kfd::Condition::EQ, 0, UINT64_MAX));
 }
 
@@ -326,9 +326,16 @@ int main(int argc, const char **argv, const char **envp) {
 
   launch_if_present(dev, exe, compute, "amdgcn.device.init.kd");
 
-  KFD_EXPECT(compute.dispatch(begin, begin_cfg, begin_ka, sig));
-  KFD_EXPECT(compute.dispatch(start, start_cfg, start_ka, sig));
-  KFD_EXPECT(compute.dispatch(end, end_cfg, end_ka, sig));
+  KFD_EXPECT(compute.command()
+                 .dispatch(begin, begin_cfg, begin_ka)
+                 .signal(sig)
+                 .submit());
+  KFD_EXPECT(compute.command()
+                 .dispatch(start, start_cfg, start_ka)
+                 .signal(sig)
+                 .submit());
+  KFD_EXPECT(
+      compute.command().dispatch(end, end_cfg, end_ka).signal(sig).submit());
   KFD_EXPECT(sig.wait(kfd::Condition::EQ, 0, UINT64_MAX));
 
   launch_if_present(dev, exe, compute, "amdgcn.device.fini.kd");
