@@ -68,7 +68,7 @@ public:
     if (is_sdma())
       rp /= sizeof(uint32_t);
     uint64_t wptr = __atomic_load_n(&pending_wptr, __ATOMIC_ACQUIRE);
-    return ((static_cast<uint32_t>(wptr) & mask) + cap - (rp & mask)) % cap;
+    return ((static_cast<uint32_t>(wptr) & mask) + cap - (rp & mask)) & mask;
   }
 
 private:
@@ -315,8 +315,12 @@ public:
 
     CommandBuffer &dispatch(const Kernel &kernel, const DispatchConfig &cfg,
                             std::span<std::byte> kernarg) {
-      uint32_t buf[DISPATCH_DWORDS];
-      return append(buf, queue.dispatch_impl(buf, kernel, cfg, kernarg.data()));
+      size_t off = words.size();
+      KFD_ASSERT(words.resize_for_overwrite(off + DISPATCH_DWORDS));
+      uint32_t n =
+          queue.dispatch_impl(words.data() + off, kernel, cfg, kernarg.data());
+      words.truncate(off + n);
+      return *this;
     }
 
     std::expected<void, Error> submit() {
@@ -333,10 +337,7 @@ public:
     explicit CommandBuffer(ComputeQueue &queue) : queue(queue) {}
 
     CommandBuffer &append(const uint32_t *data, uint32_t n) {
-      size_t old = words.size();
-      KFD_ASSERT(words.resize(old + n));
-      std::memcpy(words.data() + old, data,
-                  static_cast<size_t>(n) * sizeof(uint32_t));
+      KFD_ASSERT(words.append(data, data + n));
       return *this;
     }
 

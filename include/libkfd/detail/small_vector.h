@@ -12,7 +12,9 @@
 
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <new>
+#include <type_traits>
 #include <utility>
 
 namespace kfd::detail {
@@ -93,6 +95,37 @@ public:
     T *p = ::new (ptr + count) T(std::forward<Args>(args)...);
     ++count;
     return p;
+  }
+
+  [[nodiscard]] std::expected<void, Error> append(const T *first,
+                                                  const T *last) {
+    size_t n = static_cast<size_t>(last - first);
+    if (count + n > cap)
+      KFD_CHECK(reserve(count + n));
+    if constexpr (std::is_trivially_copyable_v<T>)
+      std::memcpy(ptr + count, first, n * sizeof(T));
+    else
+      for (size_t i = 0; i < n; ++i)
+        ::new (ptr + count + i) T(first[i]);
+    count += n;
+    return {};
+  }
+
+  [[nodiscard]] std::expected<void, Error> resize_for_overwrite(size_t n) {
+    if (n > cap)
+      KFD_CHECK(reserve(n));
+    for (size_t i = count; i < n; ++i)
+      ::new (ptr + i) T;
+    for (size_t i = n; i < count; ++i)
+      ptr[i].~T();
+    count = n;
+    return {};
+  }
+
+  void truncate(size_t n) {
+    for (size_t i = n; i < count; ++i)
+      ptr[i].~T();
+    count = n;
   }
 
   void pop_back() {

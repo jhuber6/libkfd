@@ -142,3 +142,53 @@ TEST_CASE("SmallVector - move assignment heap to empty", "[small_vector]") {
     CHECK(b[static_cast<size_t>(i)].value == i);
   REQUIRE(a.size() == 0);
 }
+
+TEST_CASE("SmallVector - append range preserves existing", "[small_vector]") {
+  SmallVector<int, 4> v;
+  REQUIRE(v.push_back(1));
+  REQUIRE(v.push_back(2));
+
+  const int more[] = {3, 4, 5, 6, 7}; // forces a spill past inline capacity
+  REQUIRE(v.append(more, more + 5));
+
+  REQUIRE(v.size() == 7);
+  for (int i = 0; i < 7; ++i)
+    CHECK(v[static_cast<size_t>(i)] == i + 1);
+
+  REQUIRE(v.append(more, more)); // empty range is a no-op
+  CHECK(v.size() == 7);
+}
+
+TEST_CASE("SmallVector - resize_for_overwrite then fill", "[small_vector]") {
+  SmallVector<int, 4> v;
+  REQUIRE(v.push_back(42));
+
+  REQUIRE(v.resize_for_overwrite(6)); // grow, tail is uninitialized storage
+  REQUIRE(v.size() == 6);
+  CHECK(v[0] == 42); // existing elements untouched
+  for (size_t i = 1; i < 6; ++i)
+    v[i] = static_cast<int>(i);
+  for (size_t i = 1; i < 6; ++i)
+    CHECK(v[i] == static_cast<int>(i));
+
+  REQUIRE(v.resize_for_overwrite(2)); // shrink destroys the tail
+  REQUIRE(v.size() == 2);
+  CHECK(v[0] == 42);
+  CHECK(v[1] == 1);
+}
+
+TEST_CASE("SmallVector - truncate", "[small_vector]") {
+  SmallVector<MoveOnly, 8> v;
+  for (int i = 0; i < 6; ++i)
+    REQUIRE(v.push_back(MoveOnly(i)));
+
+  v.truncate(3);
+  REQUIRE(v.size() == 3);
+  for (int i = 0; i < 3; ++i)
+    CHECK(v[static_cast<size_t>(i)].value == i);
+
+  v.truncate(3); // no-op when n == size()
+  CHECK(v.size() == 3);
+  v.truncate(0);
+  CHECK(v.empty());
+}

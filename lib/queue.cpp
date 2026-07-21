@@ -528,7 +528,7 @@ std::expected<void, Error> QueueBase::wait_for_room(uint32_t dwords) {
     uint32_t rp = __atomic_load_n(rp_addr, __ATOMIC_ACQUIRE);
     if (is_sdma())
       rp /= sizeof(uint32_t);
-    uint32_t in_flight = (pos + cap - rp) % cap;
+    uint32_t in_flight = (pos + cap - rp) & (cap - 1);
     if (in_flight + dwords < cap)
       return {};
     struct timespec now;
