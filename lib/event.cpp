@@ -27,16 +27,23 @@ namespace kfd {
 namespace {
 
 EventData make_event_data(const ioctl::kfd::event_data &ed) {
+  const auto &mem = ed.memory_exception_data;
+  uint32_t reason = 0;
+  if (mem.failure.NotPresent)
+    reason |= MemoryFault::NotPresent;
+  if (mem.failure.ReadOnly)
+    reason |= MemoryFault::ReadOnly;
+  if (mem.failure.NoExecute)
+    reason |= MemoryFault::NoExecute;
+  if (mem.failure.imprecise)
+    reason |= MemoryFault::Imprecise;
   return EventData{
       .memory_fault =
           {
-              .va = ed.memory_exception_data.va,
-              .gpu_id = ed.memory_exception_data.gpu_id,
-              .error_type = ed.memory_exception_data.ErrorType,
-              .not_present = ed.memory_exception_data.failure.NotPresent,
-              .read_only = ed.memory_exception_data.failure.ReadOnly,
-              .no_execute = ed.memory_exception_data.failure.NoExecute,
-              .imprecise = ed.memory_exception_data.failure.imprecise,
+              .va = mem.va,
+              .gpu_id = mem.gpu_id,
+              .error_type = mem.ErrorType,
+              .reason = reason,
           },
       .hw_exception =
           {

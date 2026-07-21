@@ -848,7 +848,7 @@ inline constexpr uint32_t ATOMIC_MEM_DWORDS = 9;
 
 inline uint32_t atomic_mem(uint32_t *out, AtomicOp op, void *addr,
                            int64_t src_data, int64_t cmp_data = 0,
-                           AtomicCommand cmd = ATOMIC_WAIT_CONFIRM,
+                           AtomicCommand cmd = ATOMIC_SINGLE_PASS,
                            CachePolicy policy = POLICY_LRU) {
   out[0] = header(Opcode::ATOMIC_MEM, 7);
   out[1] = (static_cast<uint32_t>(op) & 0x7Fu) |

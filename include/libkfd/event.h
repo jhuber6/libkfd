@@ -23,26 +23,37 @@ enum class EventType : uint32_t {
   MEMORY = /*KFD_IOC_EVENT_MEMORY=*/8,
 };
 
-struct MemoryFaultData {
+// A GPU memory access violation. Shared by Event::data() and the context
+// FaultHandler callback.
+struct MemoryFault {
+  // Bitmask of reasons a memory access faulted.
+  enum Reason : uint32_t {
+    NotPresent = 1u << 0,
+    ReadOnly = 1u << 1,
+    NoExecute = 1u << 2,
+    Imprecise = 1u << 3,
+  };
   uint64_t va;
   uint32_t gpu_id;
   uint32_t error_type;
-  uint32_t not_present;
-  uint32_t read_only;
-  uint32_t no_execute;
-  uint32_t imprecise;
+  // Bitmask of Reason bits describing why the access faulted.
+  uint32_t reason;
 };
 
-struct HWExceptionData {
+// A GPU hardware exception requiring a reset. Shared by Event::data() and the
+// context FaultHandler callback.
+struct HardwareException {
   uint32_t gpu_id;
   uint32_t reset_type;
   uint32_t reset_cause;
   uint32_t memory_lost;
 };
 
+// Populated by the kernel after a wait completes. Only the member matching the
+// event type carries meaningful data.
 struct EventData {
-  MemoryFaultData memory_fault;
-  HWExceptionData hw_exception;
+  MemoryFault memory_fault;
+  HardwareException hw_exception;
 };
 
 // At context initialization we register an event page with the kernel. Each

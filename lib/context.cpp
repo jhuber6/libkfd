@@ -76,15 +76,15 @@ Mutex runtime_mtx{};
 void default_fault_handler(const FaultInfo &f, void *) {
   if (f.kind == FaultInfo::Kind::MemoryViolation) {
     std::fprintf(stderr, "GPU memory fault at VA 0x%lx (gpu_id %u, error %u):",
-                 static_cast<unsigned long>(f.memory.va), f.gpu_id,
+                 static_cast<unsigned long>(f.memory.va), f.memory.gpu_id,
                  f.memory.error_type);
-    if (f.memory.reason & MemoryFaultInfo::NotPresent)
+    if (f.memory.reason & MemoryFault::NotPresent)
       std::fprintf(stderr, " page-not-present");
-    if (f.memory.reason & MemoryFaultInfo::ReadOnly)
+    if (f.memory.reason & MemoryFault::ReadOnly)
       std::fprintf(stderr, " read-only");
-    if (f.memory.reason & MemoryFaultInfo::NoExecute)
+    if (f.memory.reason & MemoryFault::NoExecute)
       std::fprintf(stderr, " no-execute");
-    if (f.memory.reason & MemoryFaultInfo::Imprecise)
+    if (f.memory.reason & MemoryFault::Imprecise)
       std::fprintf(stderr, " imprecise");
     std::fprintf(stderr, "\n");
     ::raise(SIGSEGV);
@@ -92,8 +92,8 @@ void default_fault_handler(const FaultInfo &f, void *) {
     std::fprintf(stderr,
                  "GPU HW exception (gpu_id %u): reset_type=%u reset_cause=%u "
                  "memory_lost=%u\n",
-                 f.gpu_id, f.hardware.reset_type, f.hardware.reset_cause,
-                 f.hardware.memory_lost);
+                 f.hardware.gpu_id, f.hardware.reset_type,
+                 f.hardware.reset_cause, f.hardware.memory_lost);
     ::raise(SIGABRT);
   }
 }
@@ -191,23 +191,26 @@ FaultInfo make_memory_fault(const ioctl::kfd::event_data &e) {
   const auto &d = e.memory_exception_data;
   uint32_t reason = 0;
   if (d.failure.NotPresent)
-    reason |= MemoryFaultInfo::NotPresent;
+    reason |= MemoryFault::NotPresent;
   if (d.failure.ReadOnly)
-    reason |= MemoryFaultInfo::ReadOnly;
+    reason |= MemoryFault::ReadOnly;
   if (d.failure.NoExecute)
-    reason |= MemoryFaultInfo::NoExecute;
+    reason |= MemoryFault::NoExecute;
   if (d.failure.imprecise)
-    reason |= MemoryFaultInfo::Imprecise;
-  FaultInfo info{.kind = FaultInfo::Kind::MemoryViolation, .gpu_id = d.gpu_id};
-  info.memory = {.va = d.va, .reason = reason, .error_type = d.ErrorType};
+    reason |= MemoryFault::Imprecise;
+  FaultInfo info{.kind = FaultInfo::Kind::MemoryViolation};
+  info.memory = {.va = d.va,
+                 .gpu_id = d.gpu_id,
+                 .error_type = d.ErrorType,
+                 .reason = reason};
   return info;
 }
 
 FaultInfo make_hw_exception(const ioctl::kfd::event_data &e) {
   const auto &d = e.hw_exception_data;
-  FaultInfo info{.kind = FaultInfo::Kind::HardwareException,
-                 .gpu_id = d.gpu_id};
-  info.hardware = {.reset_type = d.reset_type,
+  FaultInfo info{.kind = FaultInfo::Kind::HardwareException};
+  info.hardware = {.gpu_id = d.gpu_id,
+                   .reset_type = d.reset_type,
                    .reset_cause = d.reset_cause,
                    .memory_lost = d.memory_lost};
   return info;

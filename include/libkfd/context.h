@@ -13,45 +13,27 @@
 #include "libkfd/detail/small_vector.h"
 #include "libkfd/device.h"
 #include "libkfd/error.h"
+#include "libkfd/event.h"
 
 #include <cstdint>
 
 namespace kfd {
 
-class Event;
 class Signal;
 struct SignalWatcher;
 struct ExceptionWatcher;
 
-struct MemoryFaultInfo {
-  // Bitmask of reasons a memory access faulted.
-  enum Reason : uint32_t {
-    NotPresent = 1u << 0,
-    ReadOnly = 1u << 1,
-    NoExecute = 1u << 2,
-    Imprecise = 1u << 3,
-  };
-  uint64_t va;
-  uint32_t reason;
-  uint32_t error_type;
-};
-
-struct HardwareExceptionInfo {
-  uint32_t reset_type;
-  uint32_t reset_cause;
-  uint32_t memory_lost;
-};
-
+// Delivered to the FaultHandler on a GPU exception. The active union member is
+// selected by 'kind'; each carries its own gpu_id.
 struct FaultInfo {
   enum class Kind : uint32_t {
     MemoryViolation,
     HardwareException,
   };
   Kind kind;
-  uint32_t gpu_id;
   union {
-    MemoryFaultInfo memory;
-    HardwareExceptionInfo hardware;
+    MemoryFault memory;
+    HardwareException hardware;
   };
 };
 
