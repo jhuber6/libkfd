@@ -20,7 +20,9 @@ using namespace kfd::detail;
 namespace kfd {
 
 MemType Kernel::kernarg_memtype() const {
-  return dev->vram_host_visible() ? MemType::VRAM : MemType::GTT;
+  // TODO: Investigate if that can be made to use VRAM, but might require PCIe
+  // ordering changes.
+  return MemType::GTT;
 }
 
 std::expected<Buffer, Error> Kernel::alloc() const {
