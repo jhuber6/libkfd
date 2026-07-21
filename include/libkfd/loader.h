@@ -44,14 +44,14 @@ public:
     fill(buf, {}, cfg);
   }
 
+  void fill(Buffer &buf, std::span<const std::byte> explicit_args,
+            const DispatchConfig &cfg) const;
+
 private:
   friend class Executable;
 
   Kernel(const abi::KernelDescriptor *kd, const void *entry, Device *dev)
       : kd(kd), entry(entry), dev(dev) {}
-
-  void fill(Buffer &buf, std::span<const std::byte> explicit_args,
-            const DispatchConfig &cfg) const;
 
   const abi::KernelDescriptor *kd;
   const void *entry;
