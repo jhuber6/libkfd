@@ -103,6 +103,11 @@ public:
 
   void *data() const { return mapping.data(); }
 
+  std::span<std::byte> bytes() const {
+    return {static_cast<std::byte *>(data()), len};
+  }
+  operator std::span<std::byte>() const { return bytes(); }
+
   Device &owner() const { return *dev; }
 
   // Relinquish ownership without freeing. Returns the KFD handle; the caller

@@ -108,6 +108,9 @@ Buffer &Buffer::operator=(Buffer &&other) {
 std::expected<Buffer, Error> Buffer::allocate(Device &dev, size_t size,
                                               MemType type, MemFlags flags,
                                               void *addr) {
+  if (size == 0)
+    return Buffer{};
+
   if (type == MemType::VRAM &&
       (flags & MemFlags::HOST_ACCESS) != MemFlags::NONE &&
       !dev.vram_host_visible())

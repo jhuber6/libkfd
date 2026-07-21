@@ -314,9 +314,9 @@ public:
     }
 
     CommandBuffer &dispatch(const Kernel &kernel, const DispatchConfig &cfg,
-                            const Buffer &kernarg) {
+                            std::span<std::byte> kernarg) {
       uint32_t buf[DISPATCH_DWORDS];
-      return append(buf, queue.dispatch_impl(buf, kernel, cfg, kernarg));
+      return append(buf, queue.dispatch_impl(buf, kernel, cfg, kernarg.data()));
     }
 
     std::expected<void, Error> submit() {
@@ -427,7 +427,7 @@ public:
   // Dispatches a kernel launch onto the queue.
   std::expected<void, Error> dispatch(const Kernel &kernel,
                                       const DispatchConfig &cfg,
-                                      const Buffer &kernarg) {
+                                      std::span<std::byte> kernarg) {
     return command().dispatch(kernel, cfg, kernarg).submit();
   }
 
@@ -457,7 +457,7 @@ private:
       SCRATCH_GUARD_DWORDS + pm4::DISPATCH_DIRECT_DWORDS;
 
   uint32_t dispatch_impl(uint32_t *out, const Kernel &kernel,
-                         const DispatchConfig &cfg, const Buffer &kernarg);
+                         const DispatchConfig &cfg, void *kernarg);
 
   std::expected<void, Error> flush(const uint32_t *data, size_t dwords);
 

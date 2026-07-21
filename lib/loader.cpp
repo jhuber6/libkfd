@@ -19,24 +19,25 @@ using namespace kfd::detail;
 
 namespace kfd {
 
+MemType Kernel::kernarg_memtype() const {
+  return dev->vram_host_visible() ? MemType::VRAM : MemType::GTT;
+}
+
 std::expected<Buffer, Error> Kernel::alloc() const {
-  size_t total = abi::kernarg_alloc_size(kd->kernarg_size);
-  MemType type = dev->vram_host_visible() ? MemType::VRAM : MemType::GTT;
-  auto buf =
-      KFD_TRY(Buffer::allocate(*dev, align_up(total, page_size()), type,
-                               MemFlags::WRITABLE | MemFlags::COHERENT |
-                                   MemFlags::HOST_ACCESS | MemFlags::UNCACHED));
-  KFD_CHECK(buf.map(*dev));
+  auto buf = KFD_TRY(Buffer::allocate(*dev, kernarg_size(), kernarg_memtype(),
+                                      kernarg_memflags()));
+  if (buf)
+    KFD_CHECK(buf.map(*dev));
 
   return buf;
 }
 
-void Kernel::fill(Buffer &buf, std::span<const std::byte> explicit_args,
+void Kernel::fill(std::span<std::byte> region,
+                  std::span<const std::byte> explicit_args,
                   const DispatchConfig &cfg) const {
-  auto *base = static_cast<std::byte *>(buf.data());
-  size_t total = abi::kernarg_alloc_size(kd->kernarg_size);
-  size_t explicit_size = detail::min(explicit_args.size(), total);
-  if (explicit_size)
+  auto *base = region.data();
+  size_t explicit_size = detail::min(explicit_args.size(), region.size());
+  if (explicit_size && explicit_args.data() != base)
     std::memcpy(base, explicit_args.data(), explicit_size);
   if (kd->kernarg_size > explicit_size)
     std::memset(base + explicit_size, 0, kd->kernarg_size - explicit_size);

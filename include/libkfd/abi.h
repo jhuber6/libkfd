@@ -452,12 +452,16 @@ inline uint32_t occupancy(const NodeProperties &props, uint32_t gfx_version,
   return (total_blocks + bpc - 1) / bpc;
 }
 
-// Total kernarg allocation size including implicit args and dispatch packet.
-// 'kd_kernarg_size' is the kernarg_size field from the kernel descriptor,
-// which already covers explicit args + implicit args for COv5/6.
-inline size_t kernarg_alloc_size(uint32_t kd_kernarg_size) {
-  return detail::align_up(static_cast<size_t>(kd_kernarg_size), size_t(64)) +
-         sizeof(DispatchPacket);
+// Total kernarg allocation size including implicit args and, only when the
+// kernel requests the dispatch pointer, the trailing dispatch packet. The
+// descriptor's kernarg_size already covers explicit args + implicit args for
+// COv5/6.
+inline size_t kernarg_alloc_size(const KernelDescriptor &kd) {
+  size_t size =
+      detail::align_up(static_cast<size_t>(kd.kernarg_size), size_t(64));
+  if (kd.kernel_code_properties & ENABLE_SGPR_DISPATCH_PTR)
+    size += sizeof(DispatchPacket);
+  return size;
 }
 
 // Fill the implicit kernarg block and the trailing dispatch packet within a
@@ -468,14 +472,14 @@ inline size_t kernarg_alloc_size(uint32_t kd_kernarg_size) {
 // kernarg_size. We only write fields whose offsets fall within the declared
 // size.
 //
-// We need to provide the AQL Dispatch packet because the AMDHSA compute ABI
-// reads directly from it even though we aren't using AQL for our compute
-// queues.
+// We provide the AQL Dispatch packet only when the kernel requests the dispatch
+// pointer, because the AMDHSA compute ABI reads directly from it even though we
+// aren't using AQL for our compute queues.
 //
 // Layout within the buffer:
 //   [0 .. explicit_size)                           explicit args (caller fills)
 //   [implicit_offset .. +trimmed_implicit_size)    ImplicitArgs (partial OK)
-//   [align_up(kernarg_size, 64) .. +64)            DispatchPacket
+//   [align_up(kernarg_size, 64) .. +64)            DispatchPacket (if needed)
 inline void fill_implicit_args(void *buf, size_t explicit_size,
                                const KernelDescriptor &kd,
                                const DispatchConfig &cfg) {
@@ -506,12 +510,15 @@ inline void fill_implicit_args(void *buf, size_t explicit_size,
                             (cfg.grid.z > 1 || cfg.block.z > 1));
   set(offsetof(ImplicitArgs, grid_dims), &dims, sizeof(dims));
 
-  size_t pkt_offset =
-      detail::align_up(static_cast<size_t>(kd.kernarg_size), size_t(64));
-  DispatchPacket pkt;
-  fill_dispatch_packet(pkt, cfg.grid, cfg.block, kd.private_segment_fixed_size,
-                       kd.group_segment_fixed_size);
-  std::memcpy(base + pkt_offset, &pkt, sizeof(pkt));
+  if (kd.kernel_code_properties & ENABLE_SGPR_DISPATCH_PTR) {
+    size_t pkt_offset =
+        detail::align_up(static_cast<size_t>(kd.kernarg_size), size_t(64));
+    DispatchPacket pkt;
+    fill_dispatch_packet(pkt, cfg.grid, cfg.block,
+                         kd.private_segment_fixed_size,
+                         kd.group_segment_fixed_size);
+    std::memcpy(base + pkt_offset, &pkt, sizeof(pkt));
+  }
 }
 
 } // namespace kfd::abi

@@ -30,21 +30,32 @@ public:
   const abi::KernelDescriptor &descriptor() const { return *kd; }
   const void *address() const { return entry; }
 
+  size_t kernarg_size() const { return abi::kernarg_alloc_size(*kd); }
+  static constexpr size_t kernarg_align() {
+    return alignof(abi::DispatchPacket);
+  }
+  MemType kernarg_memtype() const;
+  static constexpr MemFlags kernarg_memflags() {
+    return MemFlags::WRITABLE | MemFlags::COHERENT | MemFlags::HOST_ACCESS |
+           MemFlags::UNCACHED;
+  }
+
   // Allocate a kernarg buffer with the correct memory type and flags. This
   // memory must outlive the kernel it is used to launch.
   std::expected<Buffer, Error> alloc() const;
 
-  // Fill a buffer with kernel arguments so it can be dispatched to the GPU.
+  // Fill a region with kernel arguments so it can be dispatched to the GPU.
   template <typename T>
-  void fill(Buffer &buf, const T &explicit_args,
+  void fill(std::span<std::byte> region, const T &explicit_args,
             const DispatchConfig &cfg) const {
-    fill(buf, std::as_bytes(std::span(&explicit_args, 1)), cfg);
+    fill(region, std::as_bytes(std::span(&explicit_args, 1)), cfg);
   }
-  void fill(Buffer &buf, const DispatchConfig &cfg) const {
-    fill(buf, {}, cfg);
+  void fill(std::span<std::byte> region, const DispatchConfig &cfg) const {
+    fill(region, {}, cfg);
   }
 
-  void fill(Buffer &buf, std::span<const std::byte> explicit_args,
+  void fill(std::span<std::byte> region,
+            std::span<const std::byte> explicit_args,
             const DispatchConfig &cfg) const;
 
 private:

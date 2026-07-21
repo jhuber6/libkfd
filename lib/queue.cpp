@@ -647,8 +647,7 @@ ComputeQueue::create(Device &dev, size_t ring_size, uint32_t target_xcc) {
 // the request to the watcher thread. Every dispatch shares the programmed base
 // registers and are only set on scratch reallocation.
 uint32_t ComputeQueue::dispatch_impl(uint32_t *out, const Kernel &kernel,
-                                     const DispatchConfig &cfg,
-                                     const Buffer &kernarg) {
+                                     const DispatchConfig &cfg, void *kernarg) {
   const abi::KernelDescriptor &kd = kernel.descriptor();
   uint32_t gfx = base.dev->gfx_version();
 
@@ -672,7 +671,7 @@ uint32_t ComputeQueue::dispatch_impl(uint32_t *out, const Kernel &kernel,
   const void *dispatch_pkt_addr = nullptr;
   if (kd.kernel_code_properties & abi::ENABLE_SGPR_DISPATCH_PTR)
     dispatch_pkt_addr =
-        static_cast<std::byte *>(kernarg.data()) +
+        static_cast<std::byte *>(kernarg) +
         detail::align_up(static_cast<size_t>(kd.kernarg_size), size_t(64));
 
   // Invalidate scalar and vector caches (K-cache / GLK V-cache) so the shader
@@ -692,7 +691,7 @@ uint32_t ComputeQueue::dispatch_impl(uint32_t *out, const Kernel &kernel,
                 launch_count(cfg.grid_count.z, cfg.grid.z, start.z)};
 
   n += pm4::build_dispatch_setup(out + n, gfx, kd, kernel.address(), cfg.grid,
-                                 cfg.block, kernarg.data(), dispatch_pkt_addr,
+                                 cfg.block, kernarg, dispatch_pkt_addr,
                                  cfg.dynamic_lds, private_segment_size,
                                  cooperative, start);
 
