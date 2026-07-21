@@ -1,5 +1,7 @@
 #include "test_helpers.h"
 
+#include <libkfd/loader.h>
+
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <cstddef>
@@ -46,6 +48,17 @@ template <typename T> T read_le(const void *ptr) {
 }
 
 } // namespace
+
+TEST_CASE("ELF - image_size matches file size", "[elf]") {
+  for (const auto &bin : test_binaries()) {
+    DYNAMIC_SECTION("arch: " << bin.arch) {
+      auto buf = read_file(bin.path);
+      auto size = kfd::Executable::image_size(buf.data());
+      REQUIRE_RESULT(size);
+      CHECK(*size == buf.size());
+    }
+  }
+}
 
 TEST_CASE("ELF - create rejects truncated buffer", "[elf]") {
   std::byte tiny[4] = {};

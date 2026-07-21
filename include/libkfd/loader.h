@@ -66,6 +66,8 @@ public:
   static std::expected<Executable, Error>
   load(Device &dev, std::span<const std::byte> image, ComputeQueue &compute);
 
+  static std::expected<size_t, Error> image_size(const void *image);
+
   ~Executable() = default;
 
   Executable(const Executable &) = delete;

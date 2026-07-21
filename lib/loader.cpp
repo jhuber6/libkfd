@@ -44,6 +44,20 @@ void Kernel::fill(Buffer &buf, std::span<const std::byte> explicit_args,
   abi::fill_implicit_args(base, explicit_args.size(), *kd, cfg);
 }
 
+std::expected<size_t, Error> Executable::image_size(const void *image) {
+  const auto *ident = static_cast<const uint8_t *>(image);
+  if (ident[elf::EI_MAG0] != elf::ELFMAG0 ||
+      ident[elf::EI_MAG1] != elf::ELFMAG1 ||
+      ident[elf::EI_MAG2] != elf::ELFMAG2 ||
+      ident[elf::EI_MAG3] != elf::ELFMAG3)
+    return unexpected(ENOEXEC, "image is not an ELF object");
+  if (ident[elf::EI_CLASS] != elf::ELFCLASS64)
+    return unexpected(ENOEXEC, "image is not a 64-bit ELF");
+  const auto &eh = *reinterpret_cast<const elf::Elf64_Ehdr *>(image);
+  return static_cast<size_t>(eh.e_shoff) +
+         static_cast<size_t>(eh.e_shentsize) * eh.e_shnum;
+}
+
 std::expected<Executable, Error>
 Executable::load(Device &dev, std::span<const std::byte> image,
                  ComputeQueue &compute) {
