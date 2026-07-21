@@ -21,8 +21,9 @@ namespace kfd {
 
 std::expected<Buffer, Error> Kernel::alloc() const {
   size_t total = abi::kernarg_alloc_size(kd->kernarg_size);
+  MemType type = dev->vram_host_visible() ? MemType::VRAM : MemType::GTT;
   auto buf =
-      KFD_TRY(Buffer::allocate(*dev, align_up(total, page_size()), MemType::GTT,
+      KFD_TRY(Buffer::allocate(*dev, align_up(total, page_size()), type,
                                MemFlags::WRITABLE | MemFlags::COHERENT |
                                    MemFlags::HOST_ACCESS | MemFlags::UNCACHED));
   KFD_CHECK(buf.map(*dev));

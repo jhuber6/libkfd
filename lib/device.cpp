@@ -178,8 +178,9 @@ std::expected<TrapHandlerBuffers, Error> setup_trap_handler(Device &dev) {
   auto extent = KFD_TRY(obj.load_extent());
   auto &[lo, hi, align] = extent;
 
+  MemType type = dev.vram_host_visible() ? MemType::VRAM : MemType::GTT;
   auto code = KFD_TRY(Buffer::allocate(
-      dev, static_cast<size_t>(hi - lo), MemType::GTT,
+      dev, static_cast<size_t>(hi - lo), type,
       MemFlags::WRITABLE | MemFlags::EXECUTABLE | MemFlags::HOST_ACCESS));
   KFD_CHECK(code.map(dev));
 
@@ -201,9 +202,8 @@ std::expected<TrapHandlerBuffers, Error> setup_trap_handler(Device &dev) {
                 static_cast<size_t>(ph.p_filesz));
   }
 
-  auto tma =
-      KFD_TRY(Buffer::allocate(dev, page_size(), MemType::GTT,
-                               MemFlags::WRITABLE | MemFlags::HOST_ACCESS));
+  auto tma = KFD_TRY(Buffer::allocate(
+      dev, page_size(), type, MemFlags::WRITABLE | MemFlags::HOST_ACCESS));
   KFD_CHECK(tma.map(dev));
 
   // Sets up the trap base address and the trap memory address. This is the
