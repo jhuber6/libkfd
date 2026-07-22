@@ -123,7 +123,7 @@ std::expected<void, Error> wait_all(std::span<Signal *> signals, Condition cond,
   for (;;) {
     if (check_all(signals, cond, value))
       return {};
-    if (now_ns() >= spin_deadline)
+    if (timeout_ns < UINT64_MAX && now_ns() >= spin_deadline)
       break;
     if (signals.size() == 1)
       detail::spin_wait(
@@ -161,7 +161,7 @@ std::expected<size_t, Error> wait_any(std::span<Signal *> signals,
     int idx = check_any(signals, cond, value);
     if (idx >= 0)
       return static_cast<size_t>(idx);
-    if (now_ns() >= spin_deadline)
+    if (timeout_ns < UINT64_MAX && now_ns() >= spin_deadline)
       break;
     detail::spin_hint();
   }
