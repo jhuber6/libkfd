@@ -242,6 +242,7 @@ bool QueueBase::scratch_handler(void *user_data) {
 // is a ring buffer that consumes variable length packets for the processor.
 std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
                                                   size_t ring_size,
+                                                  uint32_t priority,
                                                   uint32_t target_xcc) {
   Context &ctx = dev.context();
   if (!std::has_single_bit(ring_size))
@@ -249,6 +250,9 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
                            ring_size);
   if (ring_size > UINT32_MAX)
     return kfd::unexpected(EINVAL, "ring size %zu exceeds uint32_t", ring_size);
+  if (priority > 15)
+    return kfd::unexpected(
+        EINVAL, "invalid queue priority; %u exceeds max of 15", priority);
 
   const bool is_compute = type == QueueType::COMPUTE;
 
@@ -358,7 +362,7 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
       .gpu_id = dev.gpu_id(),
       .queue_type = static_cast<uint32_t>(type),
       .queue_percentage = (target_xcc << 8) | 100,
-      .queue_priority = 7,
+      .queue_priority = priority,
   };
   if (is_compute) {
     args.eop_buffer_address = reinterpret_cast<uintptr_t>(eop_buf.data());
@@ -616,8 +620,10 @@ std::expected<void, Error> QueueBase::submit_impl(const uint32_t *data,
 
 // PM4 queues execute packets in order but do not explicitly wait for
 // completion.
-std::expected<ComputeQueue, Error>
-ComputeQueue::create(Device &dev, size_t ring_size, uint32_t target_xcc) {
+std::expected<ComputeQueue, Error> ComputeQueue::create(Device &dev,
+                                                        size_t ring_size,
+                                                        uint32_t priority,
+                                                        uint32_t target_xcc) {
   // Allocate before the queue is live so the VRAM alloc + map cannot trigger
   // a process eviction while the CP is already fetching from the ring.
   auto eop_vram = KFD_TRY(Buffer::allocate(
@@ -625,8 +631,8 @@ ComputeQueue::create(Device &dev, size_t ring_size, uint32_t target_xcc) {
       MemFlags::WRITABLE | MemFlags::NO_SUBSTITUTE | MemFlags::UNCACHED));
   KFD_CHECK(eop_vram.map(dev));
 
-  auto base = KFD_TRY(
-      QueueBase::create(dev, QueueType::COMPUTE, ring_size, target_xcc));
+  auto base = KFD_TRY(QueueBase::create(dev, QueueType::COMPUTE, ring_size,
+                                        target_xcc, priority));
 
   ComputeQueue q(std::move(base), std::move(eop_vram));
 
@@ -764,8 +770,9 @@ ComputeQueue::set_cu_mask(std::span<const uint32_t> mask) {
 }
 
 std::expected<CooperativeQueue, Error>
-CooperativeQueue::create(Device &dev, size_t ring_size, uint32_t target_xcc) {
-  auto cq = KFD_TRY(ComputeQueue::create(dev, ring_size, target_xcc));
+CooperativeQueue::create(Device &dev, size_t ring_size, uint32_t priority,
+                         uint32_t target_xcc) {
+  auto cq = KFD_TRY(ComputeQueue::create(dev, ring_size, target_xcc, priority));
 
   // GFX12+ uses GLG_EN in the dispatch packet itself, otherwise we need the GWS
   // ioctl to mark the queue as exclusively scheduled (non-preemptible).
@@ -787,15 +794,17 @@ CooperativeQueue::create(Device &dev, size_t ring_size, uint32_t target_xcc) {
 }
 
 // SDMA queues execute packets in-order to copy between PCI-e or XGMI.
-std::expected<SDMAQueue, Error> SDMAQueue::create(Device &dev,
-                                                  size_t ring_size) {
-  auto base = KFD_TRY(QueueBase::create(dev, QueueType::SDMA, ring_size));
+std::expected<SDMAQueue, Error> SDMAQueue::create(Device &dev, size_t ring_size,
+                                                  uint32_t priority) {
+  auto base = KFD_TRY(QueueBase::create(dev, QueueType::SDMA, ring_size,
+                                        /*target_xcc=*/0, priority));
   return SDMAQueue(std::move(base));
 }
 
-std::expected<XGMIQueue, Error> XGMIQueue::create(Device &dev,
-                                                  size_t ring_size) {
-  auto base = KFD_TRY(QueueBase::create(dev, QueueType::SDMA_XGMI, ring_size));
+std::expected<XGMIQueue, Error> XGMIQueue::create(Device &dev, size_t ring_size,
+                                                  uint32_t priority) {
+  auto base = KFD_TRY(QueueBase::create(dev, QueueType::SDMA_XGMI, ring_size,
+                                        /*target_xcc=*/0, priority));
   return XGMIQueue(std::move(base));
 }
 

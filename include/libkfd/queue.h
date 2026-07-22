@@ -45,6 +45,9 @@ enum class QueueType : uint8_t {
 // of these and forward through it; users interact with the concrete wrappers.
 class QueueBase {
 public:
+  // Valid KFD queue priorities are 0 (lowest) through 15 (highest).
+  static constexpr uint32_t DEFAULT_PRIORITY = 7;
+
   ~QueueBase();
 
   QueueBase(const QueueBase &) = delete;
@@ -103,9 +106,9 @@ private:
     uint32_t indirect[MAX_SCRATCH_IB_DWORDS];
   };
 
-  static std::expected<QueueBase, Error> create(Device &dev, QueueType type,
-                                                size_t ring_size,
-                                                uint32_t target_xcc = 0);
+  static std::expected<QueueBase, Error>
+  create(Device &dev, QueueType type, size_t ring_size,
+         uint32_t priority = DEFAULT_PRIORITY, uint32_t target_xcc = 0);
 
   QueueBase() = default;
   QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
@@ -158,7 +161,8 @@ class ComputeQueue {
 public:
   static std::expected<ComputeQueue, Error>
   create(Device &dev, size_t ring_size = 4ul * detail::page_size(),
-         uint32_t target_xcc = 0);
+         uint32_t target_xcc = 0,
+         uint32_t priority = QueueBase::DEFAULT_PRIORITY);
 
   ~ComputeQueue() = default;
 
@@ -481,6 +485,7 @@ class CooperativeQueue : public ComputeQueue {
 public:
   static std::expected<CooperativeQueue, Error>
   create(Device &dev, size_t ring_size = 4ul * detail::page_size(),
+         uint32_t priority = QueueBase::DEFAULT_PRIORITY,
          uint32_t target_xcc = 0);
 
 private:
@@ -493,7 +498,8 @@ private:
 class SDMAQueue {
 public:
   static std::expected<SDMAQueue, Error>
-  create(Device &dev, size_t ring_size = detail::page_size());
+  create(Device &dev, size_t ring_size = detail::page_size(),
+         uint32_t priority = QueueBase::DEFAULT_PRIORITY);
 
   ~SDMAQueue() = default;
 
@@ -604,7 +610,8 @@ private:
 class XGMIQueue : public SDMAQueue {
 public:
   static std::expected<XGMIQueue, Error>
-  create(Device &dev, size_t ring_size = detail::page_size());
+  create(Device &dev, size_t ring_size = detail::page_size(),
+         uint32_t priority = QueueBase::DEFAULT_PRIORITY);
 
 private:
   explicit XGMIQueue(QueueBase &&b) : SDMAQueue(std::move(b)) {}
