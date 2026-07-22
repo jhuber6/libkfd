@@ -113,8 +113,10 @@ private:
             Buffer cwsr_bo, volatile uint64_t *doorbell,
             detail::Box<Event> err_event, detail::Mutex submit_mtx);
 
-  std::expected<void, Error> submit(const uint32_t *data, size_t dwords);
-  std::expected<void, Error> submit_impl(const uint32_t *data, size_t dwords);
+  std::expected<void, Error> submit(const uint32_t *data, size_t dwords,
+                                    uint64_t timeout_ns = 0);
+  std::expected<void, Error> submit_impl(const uint32_t *data, size_t dwords,
+                                         uint64_t timeout_ns = 0);
 
   QueueControl *ctl() const {
     return static_cast<QueueControl *>(control.data());
@@ -122,7 +124,8 @@ private:
   bool is_sdma() const {
     return type == QueueType::SDMA || type == QueueType::SDMA_XGMI;
   }
-  std::expected<void, Error> wait_for_room(uint32_t dwords);
+  std::expected<void, Error> wait_for_room(uint32_t dwords,
+                                           uint64_t timeout_ns = 0);
   static bool queue_error_handler(void *user_data);
   static bool scratch_handler(void *user_data);
   static bool scratch_grow(ScratchCtx *sctx, uint32_t needed_perwave,
@@ -323,8 +326,8 @@ public:
       return *this;
     }
 
-    std::expected<void, Error> submit() {
-      return queue.flush(words.data(), words.size());
+    std::expected<void, Error> submit(uint64_t timeout_ns = 0) {
+      return queue.flush(words.data(), words.size(), timeout_ns);
     }
 
     void reset() { words.clear(); }
@@ -460,7 +463,8 @@ private:
   uint32_t dispatch_impl(uint32_t *out, const Kernel &kernel,
                          const DispatchConfig &cfg, void *kernarg);
 
-  std::expected<void, Error> flush(const uint32_t *data, size_t dwords);
+  std::expected<void, Error> flush(const uint32_t *data, size_t dwords,
+                                   uint64_t timeout_ns = 0);
 
   explicit ComputeQueue(QueueBase &&b, Buffer &&vram)
       : eop_seq(std::move(vram)), base(std::move(b)) {}

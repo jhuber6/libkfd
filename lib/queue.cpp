@@ -515,46 +515,51 @@ QueueBase &QueueBase::operator=(QueueBase &&other) {
   return *this;
 }
 
-std::expected<void, Error> QueueBase::wait_for_room(uint32_t dwords) {
+std::expected<void, Error> QueueBase::wait_for_room(uint32_t dwords,
+                                                    uint64_t timeout_ns) {
   uint32_t cap = static_cast<uint32_t>(ring_dwords());
   uint32_t pos = static_cast<uint32_t>(pending_wptr & (cap - 1));
   volatile uint32_t *rp_addr =
       reinterpret_cast<volatile uint32_t *>(&ctl()->read_ptr);
-  constexpr uint64_t TIMEOUT_US = 5'000'000;
-
-  bool armed = false;
+  uint32_t last_rp = __atomic_load_n(rp_addr, __ATOMIC_ACQUIRE);
   uint64_t deadline_ns = 0;
+  bool armed = false;
   for (;;) {
-    uint32_t rp = __atomic_load_n(rp_addr, __ATOMIC_ACQUIRE);
-    if (is_sdma())
-      rp /= sizeof(uint32_t);
+    uint32_t raw_rp = __atomic_load_n(rp_addr, __ATOMIC_ACQUIRE);
+    uint32_t rp = is_sdma() ? raw_rp / sizeof(uint32_t) : raw_rp;
     uint32_t in_flight = (pos + cap - rp) & (cap - 1);
     if (in_flight + dwords < cap)
       return {};
-    struct timespec now;
-    ::clock_gettime(CLOCK_MONOTONIC, &now);
-    uint64_t now_ns = static_cast<uint64_t>(now.tv_sec) * 1'000'000'000 +
-                      static_cast<uint64_t>(now.tv_nsec);
-    if (!armed) {
-      deadline_ns = now_ns + TIMEOUT_US * 1'000;
-      armed = true;
-    } else if (now_ns >= deadline_ns) {
-      return kfd::unexpected(
-          ETIMEDOUT, "ring buffer stall waiting for %u dwords of wrap padding",
-          dwords);
+    if (timeout_ns != 0) {
+      struct timespec now;
+      ::clock_gettime(CLOCK_MONOTONIC, &now);
+      uint64_t now_ns = static_cast<uint64_t>(now.tv_sec) * 1'000'000'000 +
+                        static_cast<uint64_t>(now.tv_nsec);
+      if (!armed || raw_rp != last_rp) {
+        last_rp = raw_rp;
+        deadline_ns = now_ns + timeout_ns;
+        armed = true;
+      } else if (now_ns >= deadline_ns) {
+        return kfd::unexpected(
+            ETIMEDOUT,
+            "ring buffer stall; no consumer progress waiting for %u "
+            "dwords of room",
+            dwords);
+      }
     }
     detail::spin_hint();
   }
 }
 
-std::expected<void, Error> QueueBase::submit(const uint32_t *data,
-                                             size_t n_dwords) {
+std::expected<void, Error>
+QueueBase::submit(const uint32_t *data, size_t n_dwords, uint64_t timeout_ns) {
   detail::LockGuard guard(submit_mtx);
-  return submit_impl(data, n_dwords);
+  return submit_impl(data, n_dwords, timeout_ns);
 }
 
 std::expected<void, Error> QueueBase::submit_impl(const uint32_t *data,
-                                                  size_t n_dwords) {
+                                                  size_t n_dwords,
+                                                  uint64_t timeout_ns) {
   auto n = static_cast<uint32_t>(n_dwords);
   if (n == 0)
     return {};
@@ -576,7 +581,7 @@ std::expected<void, Error> QueueBase::submit_impl(const uint32_t *data,
 
   if (pos + n > cap) {
     uint32_t pad = cap - pos;
-    KFD_CHECK(wait_for_room(pad));
+    KFD_CHECK(wait_for_room(pad, timeout_ns));
 
     if (is_sdma()) {
       base[pos] = (pad - 1) << 16;
@@ -595,7 +600,7 @@ std::expected<void, Error> QueueBase::submit_impl(const uint32_t *data,
     pos = 0;
   }
 
-  KFD_CHECK(wait_for_room(n));
+  KFD_CHECK(wait_for_room(n, timeout_ns));
 
   std::memcpy(base + pos, data, n * sizeof(uint32_t));
   __atomic_store_n(&pending_wptr, pending_wptr + n, __ATOMIC_RELEASE);
@@ -733,9 +738,9 @@ uint32_t ComputeQueue::dispatch_impl(uint32_t *out, const Kernel &kernel,
   return n;
 }
 
-std::expected<void, Error> ComputeQueue::flush(const uint32_t *data,
-                                               size_t dwords) {
-  return base.submit(data, dwords);
+std::expected<void, Error>
+ComputeQueue::flush(const uint32_t *data, size_t dwords, uint64_t timeout_ns) {
+  return base.submit(data, dwords, timeout_ns);
 }
 
 std::expected<void, Error>
