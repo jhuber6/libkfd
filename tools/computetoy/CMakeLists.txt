@@ -27,11 +27,13 @@ function(add_shader name source)
       "SHELL:-Xclang -target-feature"
       "SHELL:-Xclang +kernarg-preload"
       "SHELL:-mllvm -amdgpu-kernarg-preload-count=16"
+      ${LIBKFD_AMDGCN_NO_SANITIZE}
     )
 
     target_link_options(${target} PRIVATE
       --target=amdgcn--amdhsa
       -mcpu=${arch}
+      ${LIBKFD_AMDGCN_NO_SANITIZE}
     )
   endforeach()
 endfunction()

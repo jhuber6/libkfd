@@ -62,12 +62,14 @@ function(add_gpu_kernel name source_file)
       -nogpulib
       -nostdlibinc
       -O2
+      ${LIBKFD_AMDGCN_NO_SANITIZE}
       ${extra_options}
     )
 
     target_link_options(${target} PRIVATE
       --target=amdgcn--amdhsa
       -mcpu=${arch}
+      ${LIBKFD_AMDGCN_NO_SANITIZE}
     )
 
     list(APPEND targets ${target})

@@ -27,11 +27,13 @@ foreach(arch IN LISTS LIBKFD_GPU_ARCHS)
     target_compile_options(${target} PRIVATE
       --target=amdgcn--amdhsa
       -mcpu=${arch}
+      ${LIBKFD_AMDGCN_NO_SANITIZE}
     )
     target_link_options(${target} PRIVATE
       --target=amdgcn--amdhsa
       -mcpu=${arch}
       -Wl,--entry=trap_entry
+      ${LIBKFD_AMDGCN_NO_SANITIZE}
     )
     list(APPEND trap_targets ${target})
 

@@ -14,11 +14,13 @@ foreach(arch IN LISTS LIBKFD_GPU_ARCHS)
     -nogpulib
     -nostdlibinc
     -O2
+    ${LIBKFD_AMDGCN_NO_SANITIZE}
   )
 
   target_link_options(${target} PRIVATE
     --target=amdgcn--amdhsa
     -mcpu=${arch}
+    ${LIBKFD_AMDGCN_NO_SANITIZE}
   )
 endforeach()
 

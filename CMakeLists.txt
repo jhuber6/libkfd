@@ -57,12 +57,15 @@ set(LIBKFD_GPU_ALL_ARCHS
   gfx12-5-generic
 )
 
+set(LIBKFD_AMDGCN_NO_SANITIZE -fno-sanitize=all)
 set(LIBKFD_GPU_ARCHS "")
 foreach(arch IN LISTS LIBKFD_GPU_ALL_ARCHS)
   try_compile(_arch_ok
     SOURCE_FROM_CONTENT test_${arch}.c "void _start(void) {}"
     COMPILE_DEFINITIONS --target=amdgcn--amdhsa -mcpu=${arch} -nogpulib
+                        ${LIBKFD_AMDGCN_NO_SANITIZE}
     LINK_OPTIONS --target=amdgcn--amdhsa -mcpu=${arch}
+                 ${LIBKFD_AMDGCN_NO_SANITIZE}
   )
   if(_arch_ok)
     list(APPEND LIBKFD_GPU_ARCHS ${arch})
