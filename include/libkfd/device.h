@@ -23,6 +23,25 @@ namespace kfd {
 class Context;
 class ComputeQueue;
 
+// Device attributes from the DRM render node (AMDGPU_INFO), as distinct from
+// NodeProperties which mirrors the KFD sysfs topology.
+struct DrmProperties {
+  // Reference counter frequency in Hz. Fixed rate timing counter.
+  uint64_t timestamp_freq;
+  // Peak shader engine clock in Hz.
+  uint64_t max_engine_clock;
+  // Peak memory clock in Hz.
+  uint64_t max_memory_clock;
+  // VRAM bus width in bits.
+  uint32_t vram_bit_width;
+  // VRAM type (AMDGPU_VRAM_TYPE_*).
+  uint32_t vram_type;
+  // Negotiated PCIe generation.
+  uint32_t pcie_gen;
+  // Negotiated PCIe lane count.
+  uint32_t pcie_num_lanes;
+};
+
 class Device {
 public:
   // Opens the render node, calls ACQUIRE_VM, queries the GPUVM aperture, and
@@ -37,6 +56,7 @@ public:
   Device &operator=(Device &&other) = delete;
 
   const NodeProperties &properties() const { return info.props; }
+  const DrmProperties &drm_properties() const { return drm_props; }
   uint32_t gpu_id() const { return info.props.gpu_id; }
   uint32_t gfx_version() const { return info.props.gfx_target_version; }
   int render_fd() const { return drm_fd; }
@@ -81,6 +101,7 @@ private:
   Context *ctx;
   NodeInfo info;
   int drm_fd = -1;
+  DrmProperties drm_props{};
 
   // Memory apertures for VRAM and scratch ranges.
   uintptr_t gpuvm_base = 0;

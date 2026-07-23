@@ -590,13 +590,11 @@ public:
     return base.submit(buf, n);
   }
 
-  // Stalls the engine until the signal's value satisfies the condition. SDMA
-  // has no 64-bit memory poll, so only the low 32 bits of the fence are
-  // compared; this is exact for counting signals but cannot observe an epoch
-  // that overflows 32 bits.
-  std::expected<void, Error> wait(Signal &sig, Condition cond, uint64_t value) {
+  // Stalls the engine until the fence satisfies the condition. SDMA has no
+  // 64-bit memory poll, so the compared value is 32-bit by construction.
+  std::expected<void, Error> wait(Signal &sig, Condition cond, uint32_t value) {
     uint32_t buf[sdma::POLL_REGMEM_DWORDS];
-    sdma::poll_regmem(buf, sig.fence_addr(), cond, detail::lo(value));
+    sdma::poll_regmem(buf, sig.fence_addr(), cond, value);
     return base.submit(buf, sdma::POLL_REGMEM_DWORDS);
   }
 

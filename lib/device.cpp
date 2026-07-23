@@ -222,6 +222,28 @@ std::expected<TrapHandlerBuffers, Error> setup_trap_handler(Device &dev) {
 
 constexpr size_t DOORBELL_PAGE_SIZE = 8192;
 
+std::expected<DrmProperties, Error> query_drm_properties(int drm_fd) {
+  drm_amdgpu_info_device dev_info{};
+  ioctl::drm::info_args req{
+      .return_pointer = reinterpret_cast<uintptr_t>(&dev_info),
+      .return_size = sizeof(dev_info),
+      .query = AMDGPU_INFO_DEV_INFO,
+  };
+  KFD_CHECK(ioctl::call<ioctl::drm::AMDGPU_INFO>(drm_fd, req));
+
+  // AMDGPU_INFO reports every clock in kHz.
+  DrmProperties props{
+      .timestamp_freq = uint64_t(dev_info.gpu_counter_freq) * 1000ull,
+      .max_engine_clock = dev_info.max_engine_clock * 1000ull,
+      .max_memory_clock = dev_info.max_memory_clock * 1000ull,
+      .vram_bit_width = dev_info.vram_bit_width,
+      .vram_type = dev_info.vram_type,
+      .pcie_gen = dev_info.pcie_gen,
+      .pcie_num_lanes = dev_info.pcie_num_lanes,
+  };
+  return props;
+}
+
 } // namespace
 
 Device::Device(Context &ctx, NodeInfo info)
@@ -257,6 +279,7 @@ std::expected<Device, Error> Device::create(Context &ctx, NodeInfo info) {
       dev.scratch_aperture_base = raw[i].scratch_base;
       dev.scratch_aperture_limit = raw[i].scratch_limit;
       dev.drm_fd = rfd;
+      dev.drm_props = KFD_TRY(query_drm_properties(rfd));
 
       ioctl::kfd::set_memory_policy_args pol{
           .alternate_aperture_base = dev.gpuvm_base,
@@ -303,8 +326,8 @@ Device::~Device() = default;
 
 Device::Device(Device &&other)
     : ctx(std::exchange(other.ctx, nullptr)), info(std::move(other.info)),
-      drm_fd(std::exchange(other.drm_fd, -1)), gpuvm_base(other.gpuvm_base),
-      gpuvm_limit(other.gpuvm_limit),
+      drm_fd(std::exchange(other.drm_fd, -1)), drm_props(other.drm_props),
+      gpuvm_base(other.gpuvm_base), gpuvm_limit(other.gpuvm_limit),
       scratch_aperture_base(other.scratch_aperture_base),
       scratch_aperture_limit(other.scratch_aperture_limit),
       doorbells(std::move(other.doorbells)),
