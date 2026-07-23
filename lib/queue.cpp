@@ -32,9 +32,11 @@ using namespace kfd::detail;
 namespace kfd {
 
 struct QueueErrorCtx {
+  Context *ctx;
   uint64_t *err_payload;
   uint32_t queue_id;
   uint32_t gpu_id;
+  uint64_t error;
 };
 
 struct ScratchCtx {
@@ -99,22 +101,21 @@ uint32_t set_scratch_sgprs(uint32_t *out, uint32_t gfx_version,
   return n;
 }
 
-void report_queue_exception(uint32_t queue_id, uint32_t gpu_id, uint64_t code) {
-  std::fprintf(stderr, "GPU queue exception (queue %u, gpu_id %u): code 0x%lx",
-               queue_id, gpu_id, static_cast<unsigned long>(code));
-  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_ABORT))
-    std::fprintf(stderr, " wave-abort");
-  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_TRAP))
-    std::fprintf(stderr, " wave-trap");
-  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_MATH_ERROR))
-    std::fprintf(stderr, " math-error");
-  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_ILLEGAL_INSTRUCTION))
-    std::fprintf(stderr, " illegal-inst");
-  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_MEMORY_VIOLATION))
-    std::fprintf(stderr, " mem-violation");
-  if (code & KFD_EC_MASK(EC_QUEUE_WAVE_APERTURE_VIOLATION))
-    std::fprintf(stderr, " aperture-violation");
-  std::fprintf(stderr, "\n");
+QueueError make_queue_error(uint32_t queue_id, uint32_t gpu_id, uint64_t code) {
+  using Kind = QueueError::Kind;
+  Kind kind = Kind::None;
+  if (code & (KFD_EC_MASK(EC_QUEUE_WAVE_MEMORY_VIOLATION) |
+              KFD_EC_MASK(EC_QUEUE_WAVE_APERTURE_VIOLATION)))
+    kind = Kind::MemoryViolation;
+  else if (code & KFD_EC_MASK(EC_QUEUE_WAVE_ILLEGAL_INSTRUCTION))
+    kind = Kind::IllegalInstruction;
+  else if (code & KFD_EC_MASK(EC_QUEUE_WAVE_MATH_ERROR))
+    kind = Kind::MathError;
+  else if (code & KFD_EC_MASK(EC_QUEUE_WAVE_ABORT))
+    kind = Kind::Abort;
+  else if (code) // any other non-zero code is a generic wave trap
+    kind = Kind::Trap;
+  return QueueError{.queue_id = queue_id, .gpu_id = gpu_id, .kind = kind};
 }
 
 } // namespace
@@ -122,11 +123,18 @@ void report_queue_exception(uint32_t queue_id, uint32_t gpu_id, uint64_t code) {
 bool QueueBase::queue_error_handler(void *user_data) {
   auto *ectx = static_cast<QueueErrorCtx *>(user_data);
   uint64_t err = __atomic_load_n(ectx->err_payload, __ATOMIC_ACQUIRE);
-  if (err) {
-    report_queue_exception(ectx->queue_id, ectx->gpu_id, err);
-    __atomic_store_n(ectx->err_payload, 0, __ATOMIC_RELEASE);
-    ::raise(SIGABRT);
-  }
+  if (!err)
+    return true;
+  __atomic_store_n(ectx->err_payload, 0, __ATOMIC_RELEASE);
+
+  // Grab the current error from the context payload.
+  uint64_t expected = 0;
+  __atomic_compare_exchange_n(&ectx->error, &expected, err, /*weak=*/false,
+                              __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+
+  FaultInfo info{.kind = FaultInfo::Kind::QueueException};
+  info.queue = make_queue_error(ectx->queue_id, ectx->gpu_id, err);
+  ectx->ctx->notify_fault(info);
   return true;
 }
 
@@ -406,9 +414,12 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
               std::move(cwsr_bo_buf), *db_slot, std::move(err_ev), {});
 
   if (q.err_event) {
-    q.err_watch_ctx = KFD_TRY(detail::Box<QueueErrorCtx>::create(
-        QueueErrorCtx{reinterpret_cast<uint64_t *>(&q.ctl()->err_payload), q.id,
-                      dev.gpu_id()}));
+    q.err_watch_ctx = KFD_TRY(detail::Box<QueueErrorCtx>::create(QueueErrorCtx{
+        .ctx = &ctx,
+        .err_payload = reinterpret_cast<uint64_t *>(&q.ctl()->err_payload),
+        .queue_id = q.id,
+        .gpu_id = dev.gpu_id(),
+        .error = 0}));
     KFD_CHECK(ctx.register_handler(*q.err_event, queue_error_handler,
                                    q.err_watch_ctx.get()));
   }
@@ -567,6 +578,14 @@ std::expected<void, Error> QueueBase::submit_impl(const uint32_t *data,
   auto n = static_cast<uint32_t>(n_dwords);
   if (n == 0)
     return {};
+
+  // Errors on the queue stall the CP until cleared, refuse to advance.
+  if (QueueErrorCtx *ectx = err_watch_ctx.get()) {
+    if (uint64_t err = __atomic_load_n(&ectx->error, __ATOMIC_ACQUIRE))
+      return kfd::unexpected(ECANCELED,
+                             "queue %u faulted (code 0x%lx); reset required",
+                             id, static_cast<unsigned long>(err));
+  }
 
   uint32_t cap = static_cast<uint32_t>(ring_dwords());
   if (n >= cap)

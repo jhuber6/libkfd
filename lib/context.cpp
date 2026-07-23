@@ -74,7 +74,8 @@ Mutex runtime_mtx{};
 
 // Default fault policy describes the fault on stderr and terminates.
 void default_fault_handler(const FaultInfo &f, void *) {
-  if (f.kind == FaultInfo::Kind::MemoryViolation) {
+  switch (f.kind) {
+  case FaultInfo::Kind::MemoryViolation:
     std::fprintf(stderr, "GPU memory fault at VA 0x%lx (gpu_id %u, error %u):",
                  static_cast<unsigned long>(f.memory.va), f.memory.gpu_id,
                  f.memory.error_type);
@@ -88,13 +89,39 @@ void default_fault_handler(const FaultInfo &f, void *) {
       std::fprintf(stderr, " imprecise");
     std::fprintf(stderr, "\n");
     ::raise(SIGSEGV);
-  } else {
+    return;
+  case FaultInfo::Kind::HardwareException:
     std::fprintf(stderr,
                  "GPU HW exception (gpu_id %u): reset_type=%u reset_cause=%u "
                  "memory_lost=%u\n",
                  f.hardware.gpu_id, f.hardware.reset_type,
                  f.hardware.reset_cause, f.hardware.memory_lost);
     ::raise(SIGABRT);
+    return;
+  case FaultInfo::Kind::QueueException: {
+    const char *what = "trap";
+    switch (f.queue.kind) {
+    case QueueError::Kind::MemoryViolation:
+      what = "memory-violation";
+      break;
+    case QueueError::Kind::IllegalInstruction:
+      what = "illegal-instruction";
+      break;
+    case QueueError::Kind::MathError:
+      what = "math-error";
+      break;
+    case QueueError::Kind::Abort:
+      what = "abort";
+      break;
+    case QueueError::Kind::Trap:
+    case QueueError::Kind::None:
+      break;
+    }
+    std::fprintf(stderr, "GPU queue exception (queue %u, gpu_id %u): %s\n",
+                 f.queue.queue_id, f.queue.gpu_id, what);
+    ::raise(SIGABRT);
+    return;
+  }
   }
 }
 
@@ -216,10 +243,9 @@ FaultInfo make_hw_exception(const ioctl::kfd::event_data &e) {
   return info;
 }
 
-void dispatch_faults(ExceptionWatcher *w, const ioctl::kfd::event_data &mem,
-                     const ioctl::kfd::event_data &hw) {
-  if (!mem.memory_exception_data.gpu_id && !hw.hw_exception_data.gpu_id)
-    return;
+// Snapshot the handler under the lock so unregister cannot swap it mid-call,
+// then invoke it with no lock held across user code.
+void invoke_fault_handler(ExceptionWatcher *w, const FaultInfo &info) {
   FaultHandler handler;
   void *user_data;
   {
@@ -227,10 +253,15 @@ void dispatch_faults(ExceptionWatcher *w, const ioctl::kfd::event_data &mem,
     handler = w->fault_handler;
     user_data = w->fault_user_data;
   }
+  handler(info, user_data);
+}
+
+void dispatch_faults(ExceptionWatcher *w, const ioctl::kfd::event_data &mem,
+                     const ioctl::kfd::event_data &hw) {
   if (mem.memory_exception_data.gpu_id)
-    handler(make_memory_fault(mem), user_data);
+    invoke_fault_handler(w, make_memory_fault(mem));
   if (hw.hw_exception_data.gpu_id)
-    handler(make_hw_exception(hw), user_data);
+    invoke_fault_handler(w, make_hw_exception(hw));
 }
 
 void *signal_watcher_entry(void *arg) {
@@ -611,6 +642,11 @@ Context::register_handler(Signal &sig, Condition cond, uint32_t value,
 std::expected<void, Error> Context::register_handler(FaultHandler cb,
                                                      void *user_data) {
   return set_fault_handler(exception_watcher.get(), cb, user_data);
+}
+
+void Context::notify_fault(const FaultInfo &fault) {
+  if (exception_watcher)
+    invoke_fault_handler(exception_watcher.get(), fault);
 }
 
 } // namespace kfd

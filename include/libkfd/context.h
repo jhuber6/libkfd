@@ -29,11 +29,13 @@ struct FaultInfo {
   enum class Kind : uint32_t {
     MemoryViolation,
     HardwareException,
+    QueueException,
   };
   Kind kind;
   union {
     MemoryFault memory;
     HardwareException hardware;
+    QueueError queue;
   };
 };
 
@@ -88,6 +90,8 @@ private:
 
   std::expected<uint64_t *, Error> event_slot(uint32_t id);
   std::expected<uint32_t *, Error> fence_slot(uint32_t id);
+
+  void notify_fault(const FaultInfo &fault);
 
   std::expected<void, Error> register_handler(Event &event, SignalHandler cb,
                                               void *user_data = nullptr);

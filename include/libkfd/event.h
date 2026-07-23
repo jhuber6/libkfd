@@ -49,6 +49,21 @@ struct HardwareException {
   uint32_t memory_lost;
 };
 
+// A wave trap latched on a compute queue.
+struct QueueError {
+  enum class Kind : uint32_t {
+    None,
+    MemoryViolation,
+    IllegalInstruction,
+    MathError,
+    Abort,
+    Trap,
+  };
+  uint32_t queue_id;
+  uint32_t gpu_id;
+  Kind kind;
+};
+
 // Populated by the kernel after a wait completes. Only the member matching the
 // event type carries meaningful data.
 struct EventData {
