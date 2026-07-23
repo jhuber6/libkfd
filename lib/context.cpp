@@ -168,9 +168,9 @@ struct SignalWatcher : Watcher {
 
   struct Entry {
     uint32_t event_id;
-    uint32_t *fence;
+    uint64_t *fence;
     Condition cond;
-    uint32_t value;
+    uint64_t value;
     SignalHandler callback;
     void *user_data;
     const void *key;
@@ -196,7 +196,7 @@ struct ExceptionWatcher : Watcher {
 
 namespace {
 
-bool condition_met(Condition cond, uint32_t cur, uint32_t target) {
+bool condition_met(Condition cond, uint64_t cur, uint64_t target) {
   switch (cond) {
   case Condition::LT:
     return cur < target;
@@ -391,8 +391,8 @@ make_exception_watcher(Context &ctx) {
 }
 
 std::expected<void, Error> add_entry(SignalWatcher *w, uint32_t event_id,
-                                     uint32_t *fence, Condition cond,
-                                     uint32_t value, SignalHandler cb,
+                                     uint64_t *fence, Condition cond,
+                                     uint64_t value, SignalHandler cb,
                                      void *user_data, const void *key) {
   if (!w)
     return kfd::unexpected(EINVAL, "register_handler requires a watcher");
@@ -614,12 +614,11 @@ std::expected<uint64_t *, Error> Context::event_slot(uint32_t id) {
   return &__atomic_load_n(&event_page, __ATOMIC_ACQUIRE)[id];
 }
 
-std::expected<uint32_t *, Error> Context::fence_slot(uint32_t id) {
+std::expected<uint64_t *, Error> Context::fence_slot(uint32_t id) {
   if (id >= KFD_SIGNAL_EVENT_LIMIT)
     return kfd::unexpected(EINVAL, "fence id %u >= limit %u", id,
                            static_cast<unsigned>(KFD_SIGNAL_EVENT_LIMIT));
-  return reinterpret_cast<uint32_t *>(
-      &__atomic_load_n(&fence_page, __ATOMIC_ACQUIRE)[id]);
+  return &__atomic_load_n(&fence_page, __ATOMIC_ACQUIRE)[id];
 }
 
 std::expected<void, Error>
@@ -633,7 +632,7 @@ std::expected<void, Error> Context::unregister_handler(Event &event) {
 }
 
 std::expected<void, Error>
-Context::register_handler(Signal &sig, Condition cond, uint32_t value,
+Context::register_handler(Signal &sig, Condition cond, uint64_t value,
                           SignalHandler cb, void *user_data) {
   return add_entry(signal_watcher.get(), sig.event_id(), sig.fence_addr(), cond,
                    value, cb, user_data, /*key=*/nullptr);

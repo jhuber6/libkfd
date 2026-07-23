@@ -230,7 +230,7 @@ public:
       n += pm4::write_data(buf + n, eop, 0);
       n += pm4::release_mem(buf + n, gfx, eop, uint64_t(1));
       n += pm4::wait_reg_mem(buf + n, gfx, eop, Condition::GTE, 1);
-      n += pm4::atomic_mem(buf + n, pm4::ATOMIC_ADD_RTN_32, sig.fence_addr(),
+      n += pm4::atomic_mem(buf + n, pm4::ATOMIC_ADD_RTN_64, sig.fence_addr(),
                            int64_t(-1), 0, pm4::ATOMIC_SINGLE_PASS,
                            pm4::POLICY_BYPASS);
       n += pm4::release_mem(buf + n, gfx, sig.signal_addr(), sig.event_id(),
@@ -238,11 +238,11 @@ public:
       return append(buf, n);
     }
 
-    CommandBuffer &wait(Signal &sig, Condition cond, uint32_t value) {
-      uint32_t buf[pm4::WAIT_REG_MEM_DWORDS];
-      pm4::wait_reg_mem(buf, queue.gfx_version(), sig.fence_addr(), cond,
-                        value);
-      return append(buf, pm4::WAIT_REG_MEM_DWORDS);
+    CommandBuffer &wait(Signal &sig, Condition cond, uint64_t value) {
+      uint32_t buf[pm4::WAIT_REG_MEM64_DWORDS];
+      uint32_t n = pm4::wait_reg_mem(buf, queue.gfx_version(), sig.fence_addr(),
+                                     cond, value);
+      return append(buf, n);
     }
 
     CommandBuffer &release_mem(pm4::ReleaseMemFlags flush = pm4::REL_ALL,
@@ -280,20 +280,13 @@ public:
       return append(buf, n);
     }
 
-    CommandBuffer &wait_reg_mem(void *addr, Condition cond, uint32_t reference,
-                                uint32_t mask = 0xFFFFFFFF) {
-      uint32_t buf[pm4::WAIT_REG_MEM_DWORDS];
-      pm4::wait_reg_mem(buf, queue.gfx_version(), addr, cond, reference, mask);
-      return append(buf, pm4::WAIT_REG_MEM_DWORDS);
-    }
-
-    CommandBuffer &wait_reg_mem64(void *addr, Condition cond,
-                                  uint64_t reference,
-                                  uint64_t mask = ~uint64_t(0)) {
+    template <typename T>
+    CommandBuffer &wait_reg_mem(void *addr, Condition cond, T reference,
+                                T mask = static_cast<T>(~T(0))) {
       uint32_t buf[pm4::WAIT_REG_MEM64_DWORDS];
-      pm4::wait_reg_mem64(buf, queue.gfx_version(), addr, cond, reference,
-                          mask);
-      return append(buf, pm4::WAIT_REG_MEM64_DWORDS);
+      uint32_t n = pm4::wait_reg_mem(buf, queue.gfx_version(), addr, cond,
+                                     reference, mask);
+      return append(buf, n);
     }
 
     CommandBuffer &indirect_buffer(const void *ib_addr,
@@ -384,7 +377,7 @@ public:
   }
 
   // Stalls the CP until the signal's value satisfies the condition.
-  std::expected<void, Error> wait(Signal &sig, Condition cond, uint32_t value) {
+  std::expected<void, Error> wait(Signal &sig, Condition cond, uint64_t value) {
     return command().wait(sig, cond, value).submit();
   }
 
@@ -406,16 +399,11 @@ public:
     return command().acquire_mem(flags, range_base, range_size).submit();
   }
 
+  template <typename T>
   std::expected<void, Error> wait_reg_mem(void *addr, Condition cond,
-                                          uint32_t reference,
-                                          uint32_t mask = 0xFFFFFFFF) {
+                                          T reference,
+                                          T mask = static_cast<T>(~T(0))) {
     return command().wait_reg_mem(addr, cond, reference, mask).submit();
-  }
-
-  std::expected<void, Error> wait_reg_mem64(void *addr, Condition cond,
-                                            uint64_t reference,
-                                            uint64_t mask = ~uint64_t(0)) {
-    return command().wait_reg_mem64(addr, cond, reference, mask).submit();
   }
 
   std::expected<void, Error> indirect_buffer(const void *ib_addr,
@@ -595,17 +583,20 @@ public:
     uint32_t n = 0;
     if (base.dev->gfx_version() >= abi::GFX_VERSION_GFX10_1)
       n += sdma::gcr_req(buf + n);
-    n += sdma::atomic_mem(buf + n, sdma::ATOMIC_ADD_32, sig.fence_addr(), -1);
+    n += sdma::atomic_mem(buf + n, sdma::ATOMIC_ADD_64, sig.fence_addr(), -1);
     n += sdma::fence(buf + n, base.dev->gfx_version(), sig.signal_addr(),
                      sig.event_id());
     n += sdma::trap(buf + n, sig.trigger_data());
     return base.submit(buf, n);
   }
 
-  // Stalls the CP until the signal's value satisfies the condition.
-  std::expected<void, Error> wait(Signal &sig, Condition cond, uint32_t value) {
+  // Stalls the engine until the signal's value satisfies the condition. SDMA
+  // has no 64-bit memory poll, so only the low 32 bits of the fence are
+  // compared; this is exact for counting signals but cannot observe an epoch
+  // that overflows 32 bits.
+  std::expected<void, Error> wait(Signal &sig, Condition cond, uint64_t value) {
     uint32_t buf[sdma::POLL_REGMEM_DWORDS];
-    sdma::poll_regmem(buf, sig.fence_addr(), cond, value);
+    sdma::poll_regmem(buf, sig.fence_addr(), cond, detail::lo(value));
     return base.submit(buf, sdma::POLL_REGMEM_DWORDS);
   }
 

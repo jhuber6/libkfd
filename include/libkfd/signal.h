@@ -28,7 +28,7 @@ class Context;
 class Signal {
 public:
   static std::expected<Signal, Error> create(Context &ctx,
-                                             uint32_t initial = 1);
+                                             uint64_t initial = 1);
 
   ~Signal() = default;
 
@@ -38,7 +38,7 @@ public:
   Signal &operator=(Signal &&other);
 
   // GPU-writable fence value decremented by queues on completion.
-  uint32_t *fence_addr() const { return fence; }
+  uint64_t *fence_addr() const { return fence; }
   // Event page slot address written to trigger the kernel interrupt.
   void *signal_addr() const { return ev.signal_addr(); }
 
@@ -47,37 +47,37 @@ public:
   Event &event() { return ev; }
 
   // Return the current value of the signal.
-  uint32_t value() const { return __atomic_load_n(fence, __ATOMIC_RELAXED); }
+  uint64_t value() const { return __atomic_load_n(fence, __ATOMIC_RELAXED); }
 
   // Resets the signal value.
-  std::expected<void, Error> reset(uint32_t value = 1);
+  std::expected<void, Error> reset(uint64_t value = 1);
 
   // Signal the underlying event to wake a pending wait.
   std::expected<void, Error> signal() { return ev.signal(); }
 
   // Block until the fence value satisfies the condition against the compare
   // value, spinning first then falling back to an interrupt-driven wait.
-  std::expected<void, Error> wait(Condition cond, uint32_t value,
+  std::expected<void, Error> wait(Condition cond, uint64_t value,
                                   uint64_t timeout_ns,
                                   uint64_t spin_ns = 1'000'000);
 
   explicit operator bool() const { return static_cast<bool>(ev); }
 
 private:
-  Signal(Event &&ev, uint32_t *fence, uint32_t initial)
+  Signal(Event &&ev, uint64_t *fence, uint64_t initial)
       : ev(std::move(ev)), fence(fence) {
     __atomic_store_n(this->fence, initial, __ATOMIC_RELAXED);
   }
   Event ev;
-  uint32_t *fence = nullptr;
+  uint64_t *fence = nullptr;
 };
 
 std::expected<void, Error> wait_all(std::span<Signal *> signals, Condition cond,
-                                    uint32_t value, uint64_t timeout_ns,
+                                    uint64_t value, uint64_t timeout_ns,
                                     uint64_t spin_ns = 1'000'000);
 
 std::expected<size_t, Error> wait_any(std::span<Signal *> signals,
-                                      Condition cond, uint32_t value,
+                                      Condition cond, uint64_t value,
                                       uint64_t timeout_ns,
                                       uint64_t spin_ns = 1'000'000);
 
