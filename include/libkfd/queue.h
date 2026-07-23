@@ -287,6 +287,15 @@ public:
       return append(buf, pm4::WAIT_REG_MEM_DWORDS);
     }
 
+    CommandBuffer &wait_reg_mem64(void *addr, Condition cond,
+                                  uint64_t reference,
+                                  uint64_t mask = ~uint64_t(0)) {
+      uint32_t buf[pm4::WAIT_REG_MEM64_DWORDS];
+      pm4::wait_reg_mem64(buf, queue.gfx_version(), addr, cond, reference,
+                          mask);
+      return append(buf, pm4::WAIT_REG_MEM64_DWORDS);
+    }
+
     CommandBuffer &indirect_buffer(const void *ib_addr,
                                    uint32_t ib_size_dwords) {
       uint32_t buf[pm4::INDIRECT_BUFFER_DWORDS];
@@ -401,6 +410,12 @@ public:
                                           uint32_t reference,
                                           uint32_t mask = 0xFFFFFFFF) {
     return command().wait_reg_mem(addr, cond, reference, mask).submit();
+  }
+
+  std::expected<void, Error> wait_reg_mem64(void *addr, Condition cond,
+                                            uint64_t reference,
+                                            uint64_t mask = ~uint64_t(0)) {
+    return command().wait_reg_mem64(addr, cond, reference, mask).submit();
   }
 
   std::expected<void, Error> indirect_buffer(const void *ib_addr,

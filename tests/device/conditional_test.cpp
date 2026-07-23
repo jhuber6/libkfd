@@ -1,9 +1,11 @@
 #include "test_helpers.h"
 
+#include "libkfd/detail/utility.h"
 #include "libkfd/packets/pm4.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
+#include <ctime>
 
 using kfd::test::alloc_host_buffer;
 using kfd::test::create_queue;
@@ -17,6 +19,12 @@ namespace pm4 = kfd::pm4;
 constexpr uint32_t SENTINEL = 0xFFFFFFFFu;
 
 enum Slot : uint32_t { GATE = 0, GATE_HI = 1, TARGET = 2 };
+
+inline void sleep_ms(long ms) {
+  struct timespec ts = {.tv_sec = ms / 1000,
+                        .tv_nsec = (ms % 1000) * 1'000'000};
+  ::nanosleep(&ts, nullptr);
+}
 
 } // namespace
 
@@ -137,6 +145,57 @@ TEST_CASE("PM4 - COND_WRITE writes only when the compare holds",
       INFO("gate != reference must not write");
       REQUIRE(run(0x11u));
       CHECK(c[TARGET] == 0u);
+    }
+  }
+}
+
+TEST_CASE("PM4 - WAIT_REG_MEM64 waits on the full 64-bit value",
+          "[device][pm4]") {
+  auto &ctx = require_ctx();
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = require_gpu(ctx, di);
+      if (gpu.gfx_version() < kfd::abi::GFX_VERSION_GFX10_1)
+        SKIP("WAIT_REG_MEM64 requires GFX10+");
+
+      auto q = create_queue<kfd::ComputeQueue>(gpu);
+      REQUIRE_RESULT(q);
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
+
+      auto ctrl = alloc_host_buffer(gpu);
+      auto *base = static_cast<volatile uint32_t *>(ctrl.data());
+      auto *gate = reinterpret_cast<volatile uint64_t *>(ctrl.data());
+      volatile uint32_t *started = base + 2;
+      volatile uint32_t *done = base + 3;
+
+      constexpr uint32_t MAGIC = 0x5AFE'6402u;
+      constexpr uint64_t REFERENCE = uint64_t(1) << 32; // 2^32
+      constexpr uint64_t BELOW = REFERENCE - 1;         // 0xFFFF'FFFF
+
+      *gate = BELOW;
+      *started = 0;
+      *done = 0;
+      kfd::detail::memory_barrier();
+
+      auto cmd = q->command();
+      cmd.write_data(const_cast<uint32_t *>(started), MAGIC)
+          .wait_reg_mem64(const_cast<uint64_t *>(gate), kfd::Condition::GTE,
+                          REFERENCE)
+          .write_data(const_cast<uint32_t *>(done), MAGIC)
+          .signal(*sig);
+      REQUIRE_RESULT(cmd.submit());
+
+      sleep_ms(200);
+      CHECK(*started == MAGIC);
+      CHECK(*done == 0u);
+
+      *gate = REFERENCE;
+      kfd::detail::memory_barrier();
+
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+      CHECK(*done == MAGIC);
     }
   }
 }

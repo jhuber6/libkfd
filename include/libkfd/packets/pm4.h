@@ -29,6 +29,7 @@ enum class Opcode : uint8_t {
   COND_EXEC = 0x22,
   WRITE_DATA = 0x37,
   WAIT_REG_MEM = 0x3C,
+  WAIT_REG_MEM64 = 0x93,
   RELEASE_MEM = 0x49,
   DMA_DATA = 0x50,
   ACQUIRE_MEM = 0x58,
@@ -781,6 +782,51 @@ inline uint32_t wait_reg_mem(uint32_t *out, uint32_t gfx_version, void *addr,
   if (optimize && gfx_version >= abi::GFX_VERSION_GFX10_1)
     out[6] |= (1u << 31); // optimize_ace_offload_mode
   return WAIT_REG_MEM_DWORDS;
+}
+
+// WAIT_REG_MEM64 - stall the CP until a 64-bit memory value satisfies a
+// condition. This is the wide sibling of WAIT_REG_MEM.
+//
+// Packet layout (9 dwords):
+//   [0]  header       - IT_WAIT_REG_MEM64, count = 7
+//   [1]  control      - function[2:0], mem_space[5:4], operation[7:6],
+//                        cache_policy[26:25]
+//   [2]  addr_lo      - byte address bits [31:3] (qword-aligned, so the low
+//                        three bits are reserved unlike the dword-aligned
+//                        32-bit variant)
+//   [3]  addr_hi      - byte address bits [63:32]
+//   [4]  reference_lo - low 32 bits of the comparison value
+//   [5]  reference_hi - high 32 bits of the comparison value
+//   [6]  mask_lo      - low 32 bits of the mask
+//   [7]  mask_hi      - high 32 bits of the mask
+//   [8]  poll_interval[15:0], optimize_ace_offload_mode[31]
+//
+// The CP polls: (memory[addr] & mask) <cond> reference, all as 64-bit.
+//
+// Only defined on GFX10+ (opcode 0x93 in nvd.h); GFX9's soc15d.h has no
+// WAIT_REG_MEM64. Callers must gate on gfx_version >= GFX10_1.
+//
+// References: PACKET3_WAIT_REG_MEM64 in amdgpu/nvd.h, gfx_v12_1_pkt.h;
+//             PM4_MEC_WAIT_REG_MEM64 in
+//             rocr-runtime/libhsakmt/include/impl/pm4_cmds.h
+inline constexpr uint32_t WAIT_REG_MEM64_DWORDS = 9;
+
+inline uint32_t wait_reg_mem64(uint32_t *out, uint32_t gfx_version, void *addr,
+                               Condition cond, uint64_t value,
+                               uint64_t mask = ~uint64_t(0),
+                               bool optimize = true) {
+  out[0] = header(Opcode::WAIT_REG_MEM64, 7);
+  out[1] = static_cast<uint32_t>(cond) | (1u << 4); // mem_space = memory
+  out[2] = detail::lo(reinterpret_cast<uintptr_t>(addr)) & ~0x7u;
+  out[3] = detail::hi(reinterpret_cast<uintptr_t>(addr));
+  out[4] = detail::lo(value);
+  out[5] = detail::hi(value);
+  out[6] = detail::lo(mask);
+  out[7] = detail::hi(mask);
+  out[8] = 0x04; // poll_interval = 4 cycles (matches kernel)
+  if (optimize && gfx_version >= abi::GFX_VERSION_GFX10_1)
+    out[8] |= (1u << 31); // optimize_ace_offload_mode
+  return WAIT_REG_MEM64_DWORDS;
 }
 
 // ATOMIC_MEM - perform an atomic operation on a memory location.
