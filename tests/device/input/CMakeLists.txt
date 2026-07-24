@@ -1,5 +1,6 @@
 add_gpu_kernel(kernel kernel.c)
 add_gpu_kernel(dispatch dispatch.c)
+add_gpu_kernel(trap trap.c)
 add_gpu_kernel(memory memory.c)
 add_gpu_kernel(sync sync.c)
 add_gpu_kernel(preempt preempt.c)
