@@ -17,6 +17,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -151,6 +152,10 @@ struct Watcher {
     if (err != 0)
       return kfd::unexpected(err, "failed to create watcher thread");
     started = true;
+
+    // The watcher thread is latency critical, but usually asleep.
+    sched_param sp{.sched_priority = 1};
+    ::pthread_setschedparam(thread, SCHED_RR, &sp);
     return {};
   }
 
