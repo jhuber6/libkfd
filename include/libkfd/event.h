@@ -58,6 +58,9 @@ struct QueueError {
     MathError,
     Abort,
     Trap,
+    // Raised by the AQL packet processor.
+    InvalidPacket,
+    OutOfResources,
   };
   uint32_t queue_id;
   uint32_t gpu_id;

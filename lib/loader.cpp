@@ -61,9 +61,19 @@ std::expected<size_t, Error> Executable::image_size(const void *image) {
          static_cast<size_t>(eh.e_shentsize) * eh.e_shnum;
 }
 
-std::expected<Executable, Error>
-Executable::load(Device &dev, std::span<const std::byte> image,
-                 ComputeQueue &compute) {
+namespace {
+
+struct LoadedBinary {
+  MappedRegion file;
+  elf::ELF64LE elf;
+  Buffer vram;
+  MappedRegion host;
+  uint64_t base;
+  uint64_t bytes;
+};
+
+std::expected<LoadedBinary, Error>
+load_binary(Device &dev, std::span<const std::byte> image) {
   auto region = KFD_TRY(MappedRegion::create(image.size_bytes()));
   std::memcpy(region.data(), image.data(), image.size_bytes());
 
@@ -107,10 +117,6 @@ Executable::load(Device &dev, std::span<const std::byte> image,
   // inter-segment gaps are already correct after the memcpy loop.
   auto staging = KFD_TRY(MappedRegion::create(static_cast<size_t>(footprint)));
 
-  auto pinned = KFD_TRY(Buffer::pin_region(
-      dev, std::move(staging), MemFlags::WRITABLE | MemFlags::EXECUTABLE));
-  KFD_CHECK(pinned.map(dev));
-
   // Copy the program header values into the staging buffer.
   for (const auto &phdr : elf.phdrs()) {
     if (phdr.p_type != elf::PT_LOAD || phdr.p_filesz == 0)
@@ -124,7 +130,7 @@ Executable::load(Device &dev, std::span<const std::byte> image,
                         static_cast<unsigned long>(offset),
                         static_cast<unsigned long>(phdr.p_filesz),
                         static_cast<unsigned long>(footprint));
-    std::memcpy(static_cast<char *>(pinned.data()) + offset, seg.data(),
+    std::memcpy(static_cast<char *>(staging.data()) + offset, seg.data(),
                 static_cast<size_t>(phdr.p_filesz));
   }
 
@@ -160,7 +166,7 @@ Executable::load(Device &dev, std::span<const std::byte> image,
     const elf::Elf64_Sym *symtab = nullptr;
     if (symtab_ptr && symtab_ptr >= lo && symtab_ptr - lo < footprint)
       symtab = reinterpret_cast<const elf::Elf64_Sym *>(
-          static_cast<const char *>(pinned.data()) + symtab_ptr - lo);
+          static_cast<const char *>(staging.data()) + symtab_ptr - lo);
 
     if (rela_ptr && rela_size) {
       if (rela_ptr < lo || rela_ptr - lo > footprint ||
@@ -174,7 +180,7 @@ Executable::load(Device &dev, std::span<const std::byte> image,
                           static_cast<unsigned long>(lo));
 
       const auto *rela_table = reinterpret_cast<const elf::Elf64_Rela *>(
-          static_cast<const char *>(pinned.data()) + rela_ptr - lo);
+          static_cast<const char *>(staging.data()) + rela_ptr - lo);
       size_t count = rela_size / sizeof(elf::Elf64_Rela);
       for (size_t i = 0; i < count; ++i) {
         const auto &rel = rela_table[i];
@@ -198,27 +204,75 @@ Executable::load(Device &dev, std::span<const std::byte> image,
           continue;
         uint64_t off = rel.r_offset - lo;
         if (off + sizeof(uint64_t) <= footprint)
-          std::memcpy(static_cast<char *>(pinned.data()) + off, &value,
+          std::memcpy(static_cast<char *>(staging.data()) + off, &value,
                       sizeof(uint64_t));
       }
     }
     break;
   }
 
+  return LoadedBinary{
+      std::move(region), std::move(elf), std::move(img), std::move(staging), lo,
+      footprint};
+}
+
+} // namespace
+
+std::expected<Executable, Error>
+Executable::load(Device &dev, std::span<const std::byte> image,
+                 ComputeQueue &compute) {
+  auto bin = KFD_TRY(load_binary(dev, image));
+  auto host = KFD_TRY(Buffer::pin_region(
+      dev, std::move(bin.host), MemFlags::WRITABLE | MemFlags::EXECUTABLE));
+  KFD_CHECK(host.map(dev));
   auto sig = KFD_TRY(Signal::create(dev.context(), /*initial=*/1));
-  // DMA transfer of the entire footprint from staging into VRAM.
-  KFD_CHECK(compute.dma_copy(img.data(), pinned.data(),
-                             static_cast<uint32_t>(footprint)));
-
-  // Invalidate instruction caches so the CUs fetch fresh code from VRAM rather
-  // than stale cache lines.
-  KFD_CHECK(compute.acquire_mem(pm4::ACQ_ICACHE, img.data(), footprint));
-  KFD_CHECK(compute.signal(sig));
-
+  KFD_CHECK(compute
+                .command()
+                // DMA transfer of the entire footprint from staging into VRAM.
+                .dma_copy(bin.vram.data(), host.data(),
+                          static_cast<uint32_t>(bin.bytes))
+                // Invalidate instruction caches so the CUs fetch fresh code
+                // from VRAM rather than stale cache lines.
+                .acquire_mem(pm4::ACQ_ICACHE, bin.vram.data(), bin.bytes)
+                .signal(sig)
+                .submit());
   // Wait on all pending operations to complete.
   KFD_CHECK(sig.wait(Condition::EQ, /*value=*/0, UINT64_MAX));
+  return Executable(std::move(bin.file), std::move(bin.elf),
+                    std::move(bin.vram), bin.base);
+}
 
-  return Executable(std::move(region), elf, std::move(img), lo);
+std::expected<Executable, Error>
+Executable::load(Device &dev, std::span<const std::byte> image, AQLQueue &aql,
+                 SDMAQueue &sdma) {
+  auto bin = KFD_TRY(load_binary(dev, image));
+  auto host = KFD_TRY(Buffer::pin_region(
+      dev, std::move(bin.host), MemFlags::WRITABLE | MemFlags::EXECUTABLE));
+  KFD_CHECK(host.map(dev));
+  auto sig = KFD_TRY(Signal::create(dev.context(), /*initial=*/1));
+  KFD_CHECK(sdma.copy_linear(bin.vram.data(), host.data(),
+                             static_cast<size_t>(bin.bytes)));
+  KFD_CHECK(sdma.signal(sig));
+  KFD_CHECK(sig.wait(Condition::EQ, /*value=*/0, UINT64_MAX));
+
+  // SDMA has no ACQUIRE_MEM on GFX9. The vendor packet only holds the jump;
+  // the acquire itself lives in a buffer the CP fetches after the copy retires.
+  uint32_t ib[pm4::ACQUIRE_MEM_DWORDS];
+  uint32_t n =
+      pm4::acquire_mem(ib, dev.gfx_version(), pm4::ACQ_ICACHE,
+                       reinterpret_cast<uintptr_t>(bin.vram.data()), bin.bytes);
+  auto ib_buf = KFD_TRY(Buffer::allocate(
+      dev, n * sizeof(uint32_t), MemType::GTT,
+      MemFlags::WRITABLE | MemFlags::EXECUTABLE | MemFlags::COHERENT |
+          MemFlags::UNCACHED | MemFlags::NO_SUBSTITUTE));
+  KFD_CHECK(ib_buf.map(dev));
+  std::memcpy(ib_buf.data(), ib, n * sizeof(uint32_t));
+
+  KFD_CHECK(sig.reset(1));
+  KFD_CHECK(aql.submit_pm4(ib_buf.data(), n, sig));
+  KFD_CHECK(sig.wait(Condition::EQ, /*value=*/0, UINT64_MAX));
+  return Executable(std::move(bin.file), std::move(bin.elf),
+                    std::move(bin.vram), bin.base);
 }
 
 std::expected<std::span<std::byte>, Error>

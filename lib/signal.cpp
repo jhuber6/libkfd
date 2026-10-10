@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "libkfd/signal.h"
+#include "amd_queue.h"
 #include "libkfd/context.h"
 #include "libkfd/detail/small_vector.h"
 #include "libkfd/detail/utility.h"
@@ -15,6 +16,10 @@
 #include <utility>
 
 namespace kfd {
+
+uint64_t Signal::completion_handle() const {
+  return kfd::completion_handle(fence);
+}
 
 namespace {
 
@@ -82,7 +87,7 @@ uint64_t add_sat(uint64_t a, uint64_t b) {
 
 std::expected<Signal, Error> Signal::create(Context &ctx, uint64_t initial) {
   auto ev = KFD_TRY(Event::create(ctx));
-  auto slot = KFD_TRY(ctx.fence_slot(ev.slot_index()));
+  auto slot = KFD_TRY(ctx.fence_slot(ev));
 
   Signal sig(std::move(ev), slot, initial);
   return sig;

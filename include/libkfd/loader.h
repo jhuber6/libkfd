@@ -20,8 +20,10 @@
 
 namespace kfd {
 
+class AQLQueue;
 class ComputeQueue;
 class Device;
+class SDMAQueue;
 
 // A representation of an executable kernel on the device. Only valid for the
 // lifetime of the Executable it was obtained from.
@@ -76,6 +78,9 @@ public:
 
   static std::expected<Executable, Error>
   load(Device &dev, std::span<const std::byte> image, ComputeQueue &compute);
+  static std::expected<Executable, Error> load(Device &dev,
+                                               std::span<const std::byte> image,
+                                               AQLQueue &aql, SDMAQueue &sdma);
 
   static std::expected<size_t, Error> image_size(const void *image);
 

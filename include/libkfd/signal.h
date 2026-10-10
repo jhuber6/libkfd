@@ -39,6 +39,11 @@ public:
 
   // GPU-writable fence value decremented by queues on completion.
   uint64_t *fence_addr() const { return fence; }
+
+  // Address stored in an AQL packet's completion_signal field. The command
+  // processor treats it as the base of the signal and decrements the fence
+  // word eight bytes above it.
+  uint64_t completion_handle() const;
   // Event page slot address written to trigger the kernel interrupt.
   void *signal_addr() const { return ev.signal_addr(); }
 

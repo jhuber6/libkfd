@@ -14,6 +14,7 @@ endfunction()
 
 add_device_kernel_test(loader_test loader_test.cpp)
 add_device_kernel_test(dispatch_test dispatch_test.cpp)
+add_device_kernel_test(aql_test aql_test.cpp)
 add_device_kernel_test(trap_test trap_test.cpp)
 add_device_kernel_test(gpu_memory_test memory_test.cpp)
 add_device_kernel_test(launch_stress_test launch_stress_test.cpp)

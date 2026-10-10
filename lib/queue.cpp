@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "libkfd/queue.h"
+#include "amd_queue.h"
 #include "ioctl.h"
 #include "libkfd/context.h"
 #include "libkfd/detail/scratch.h"
@@ -20,11 +21,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <new>
 
 static_assert(static_cast<uint8_t>(kfd::QueueType::COMPUTE) ==
               KFD_IOC_QUEUE_TYPE_COMPUTE);
 static_assert(static_cast<uint8_t>(kfd::QueueType::SDMA) ==
               KFD_IOC_QUEUE_TYPE_SDMA);
+static_assert(static_cast<uint8_t>(kfd::QueueType::COMPUTE_AQL) ==
+              KFD_IOC_QUEUE_TYPE_COMPUTE_AQL);
 static_assert(static_cast<uint8_t>(kfd::QueueType::SDMA_XGMI) ==
               KFD_IOC_QUEUE_TYPE_SDMA_XGMI);
 
@@ -43,6 +47,7 @@ struct QueueErrorCtx {
 struct ScratchCtx {
   Device *dev = nullptr;
 
+  // PM4 queues are stalled by construction and make a request.
   uint64_t *scratch_cur_ptr = nullptr;
   uint32_t *ib_buf = nullptr;
 
@@ -55,6 +60,14 @@ struct ScratchCtx {
   Buffer scratch_bo;
   uint32_t scratch_perwave = 0;
   uint32_t scratch_tmpring = 0;
+
+  // AQL queues are stalled by the CP and report through the inactive signal.
+  AmdQueue *amd_queue = nullptr;
+  uint64_t *inactive = nullptr;
+  const abi::DispatchPacket *ring = nullptr;
+  uint64_t ring_packets = 0;
+  QueueErrorCtx *err = nullptr;
+  uint32_t queue_id = 0;
 };
 
 namespace {
@@ -117,6 +130,29 @@ QueueError make_queue_error(uint32_t queue_id, uint32_t gpu_id, uint64_t code) {
   else if (code) // any other non-zero code is a generic wave trap
     kind = Kind::Trap;
   return QueueError{.queue_id = queue_id, .gpu_id = gpu_id, .kind = kind};
+}
+
+// Return the number of bytes to allocate for wave scratch.
+uint32_t private_segment_bytes(const abi::KernelDescriptor &kd,
+                               uint32_t requested) {
+  if (!(kd.kernel_code_properties & abi::USES_DYNAMIC_STACK))
+    return kd.private_segment_fixed_size;
+  uint32_t extra = requested ? requested : /*8 KiB=*/8 * 1024;
+  uint64_t total = uint64_t(kd.private_segment_fixed_size) + extra;
+  return total > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(total);
+}
+
+QueueError::Kind inactive_error_kind(uint64_t code) {
+  using Kind = QueueError::Kind;
+  if (code & aql::INACTIVE_SCRATCH)
+    return Kind::OutOfResources;
+  if (code & aql::INACTIVE_MEMORY_VIOLATION)
+    return Kind::MemoryViolation;
+  if (code & aql::INACTIVE_ILLEGAL_INSTRUCTION)
+    return Kind::IllegalInstruction;
+  if (code & aql::INACTIVE_DEBUG_TRAP)
+    return Kind::Trap;
+  return Kind::InvalidPacket;
 }
 
 } // namespace
@@ -247,6 +283,71 @@ bool QueueBase::scratch_handler(void *user_data) {
   return true;
 }
 
+// Unlike PM4, the AQL queue will stall on its queue with a reason. We can
+// detect this, service it, and clear the queue's signal to continue.
+bool QueueBase::inactive_handler(void *user_data) {
+  auto *sctx = static_cast<ScratchCtx *>(user_data);
+  uint64_t code = __atomic_load_n(sctx->inactive, __ATOMIC_ACQUIRE);
+  if (code == 0)
+    return true;
+
+  if (code & aql::INACTIVE_SCRATCH) {
+    AmdQueue *q = sctx->amd_queue;
+    uint64_t rd = __atomic_load_n(&q->read_dispatch_id, __ATOMIC_ACQUIRE);
+    uint64_t wr = __atomic_load_n(&q->write_dispatch_id, __ATOMIC_ACQUIRE);
+    const abi::DispatchPacket *pkt = nullptr;
+    for (uint64_t i = rd; i < wr && !pkt; ++i) {
+      const abi::DispatchPacket &p = sctx->ring[i & (sctx->ring_packets - 1)];
+      uint32_t header = __atomic_load_n(
+          reinterpret_cast<const uint32_t *>(&p.header), __ATOMIC_ACQUIRE);
+      if (aql::packet_type(static_cast<uint16_t>(header)) ==
+              aql::PACKET_KERNEL_DISPATCH &&
+          p.private_segment_size)
+        pkt = &p;
+    }
+
+    uint32_t gfx = sctx->dev->gfx_version();
+    uint32_t lanes = (code & aql::INACTIVE_SCRATCH_WAVE32) ? 32 : 64;
+    uint32_t per_wave = pkt ? align_up(lanes * pkt->private_segment_size,
+                                       detail::scratch_alignment_unit(gfx))
+                            : 0;
+    // The same size again means the packet does not cover what the command
+    // processor measured. Another allocation would free the live region and
+    // the queue would stall on every retry.
+    if (pkt && per_wave > sctx->scratch_perwave &&
+        per_wave <= detail::max_wave_scratch(gfx) &&
+        scratch_grow(sctx, per_wave,
+                     uint32_t(pkt->workgroup_size_x) * pkt->workgroup_size_y *
+                         pkt->workgroup_size_z)) {
+      uint32_t srd[4];
+      pm4::build_scratch_srd(srd, gfx, sctx->scratch_va, sctx->scratch_tmpring,
+                             lanes == 32 ? abi::ENABLE_WAVEFRONT_SIZE32 : 0);
+      std::memcpy(q->scratch_resource_descriptor, srd, sizeof(srd));
+      q->compute_tmpring_size = sctx->scratch_tmpring;
+      q->scratch_backing_memory_location =
+          reinterpret_cast<uintptr_t>(sctx->scratch_va);
+      q->scratch_backing_memory_byte_size = sctx->scratch_size;
+      q->scratch_wave64_lane_byte_size = per_wave / 64;
+      q->scratch_max_use_index = UINT64_MAX;
+      __atomic_store_n(sctx->inactive, 0, __ATOMIC_RELEASE);
+      return true;
+    }
+  }
+
+  if (QueueErrorCtx *ectx = sctx->err) {
+    uint64_t expected = 0;
+    __atomic_compare_exchange_n(&ectx->error, &expected, code, /*weak=*/false,
+                                __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+  }
+
+  FaultInfo info{.kind = FaultInfo::Kind::QueueException};
+  info.queue = QueueError{.queue_id = sctx->queue_id,
+                          .gpu_id = sctx->dev->gpu_id(),
+                          .kind = inactive_error_kind(code)};
+  sctx->dev->context().notify_fault(info);
+  return true;
+}
+
 // Create a queue to communicate with the device's command processor. Each queue
 // is a ring buffer that consumes variable length packets for the processor.
 std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
@@ -263,12 +364,23 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
     return kfd::unexpected(
         EINVAL, "invalid queue priority; %u exceeds max of 15", priority);
 
-  const bool is_compute = type == QueueType::COMPUTE;
+  const bool is_aql = type == QueueType::COMPUTE_AQL;
+  const bool is_compute = type == QueueType::COMPUTE || is_aql;
+  // Hardware CP_HQD_PQ_CONTROL.QUEUE_SIZE enforces a minimum of 256 dwords.
+  if (is_aql && ring_size < 16 * AQLQueue::PACKET_SIZE)
+    return kfd::unexpected(
+        EINVAL, "AQL ring of %zu bytes is below the 1024-byte minimum",
+        ring_size);
 
   // Control page holds the read pointer, write pointer, EOP sequence, and
-  // exception payload.
-  auto ctl_buf = KFD_TRY(Buffer::allocate(dev, sizeof(QueueControl),
-                                          MemType::GTT, QUEUE_GTT_FLAGS));
+  // exception payload. AQL queues follow it with the CP-visible amd_queue_t,
+  // whose dispatch IDs replace the ring pointers, and its inactive signal.
+  static_assert(AMD_QUEUE_OFFSET % alignof(AmdQueue) == 0);
+  constexpr size_t INACTIVE_OFFSET = AMD_QUEUE_OFFSET + sizeof(AmdQueue);
+  size_t ctl_size = is_aql ? INACTIVE_OFFSET + sizeof(CompletionSignal)
+                           : sizeof(QueueControl);
+  auto ctl_buf =
+      KFD_TRY(Buffer::allocate(dev, ctl_size, MemType::GTT, QUEUE_GTT_FLAGS));
   KFD_CHECK(ctl_buf.map(dev));
   std::memset(ctl_buf.data(), 0, ctl_buf.size());
   auto *ctl = static_cast<QueueControl *>(ctl_buf.data());
@@ -361,12 +473,35 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
   KFD_CHECK(ring_buf.map(dev));
   std::memset(ring_buf.data(), 0, ring_buf.size());
 
+  // A zeroed AQL slot decodes as a vendor-specific packet, so every header
+  // starts out INVALID. The CP restores INVALID after consuming a packet.
+  AmdQueue *amdq = nullptr;
+  CompletionSignal *inactive = nullptr;
+  detail::Box<Event> inactive_ev;
+  if (is_aql) {
+    auto *slots = static_cast<abi::DispatchPacket *>(ring_buf.data());
+    uint32_t packets = static_cast<uint32_t>(ring_size / AQLQueue::PACKET_SIZE);
+    for (size_t i = 0; i < packets; ++i)
+      slots[i].header = aql::PACKET_INVALID;
+
+    auto raw_ev = KFD_TRY(Event::create(ctx));
+    inactive_ev = KFD_TRY(detail::Box<Event>::create(std::move(raw_ev)));
+    auto *ctl_bytes = static_cast<std::byte *>(ctl_buf.data());
+    inactive = new (ctl_bytes + INACTIVE_OFFSET) CompletionSignal();
+    inactive->bind(*inactive_ev);
+    amdq = new (ctl_bytes + AMD_QUEUE_OFFSET)
+        AmdQueue(ring_buf.data(), packets, *inactive);
+  }
+
+  uint64_t *write_ptr = is_aql ? &amdq->write_dispatch_id : &ctl->write_ptr;
+  uint64_t *read_ptr = is_aql ? &amdq->read_dispatch_id : &ctl->read_ptr;
+
   // Ensure all the queue memory is committed before submitting it.
   memory_barrier();
   ioctl::kfd::create_queue_args args{
       .ring_base_address = reinterpret_cast<uintptr_t>(ring_buf.data()),
-      .write_pointer_address = reinterpret_cast<uintptr_t>(&ctl->write_ptr),
-      .read_pointer_address = reinterpret_cast<uintptr_t>(&ctl->read_ptr),
+      .write_pointer_address = reinterpret_cast<uintptr_t>(write_ptr),
+      .read_pointer_address = reinterpret_cast<uintptr_t>(read_ptr),
       .ring_size = static_cast<uint32_t>(ring_size),
       .gpu_id = dev.gpu_id(),
       .queue_type = static_cast<uint32_t>(type),
@@ -414,18 +549,43 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
               std::move(ring_buf), std::move(eop_buf), std::move(cwsr_buf),
               std::move(cwsr_bo_buf), *db_slot, std::move(err_ev), {});
 
-  if (q.err_event) {
+  if (is_compute) {
+    uint32_t cu_count =
+        props.simd_count / (props.simd_per_cu ? props.simd_per_cu : 1);
+    KFD_CHECK(q.cu_mask_words.resize(device_cu_words(dev)));
+    for (size_t i = 0; i < q.cu_mask_words.size(); ++i) {
+      uint32_t bits = cu_count - static_cast<uint32_t>(i) * 32;
+      q.cu_mask_words[i] = bits >= 32 ? 0xFFFFFFFF : (1u << bits) - 1;
+    }
+  }
+
+  if (q.err_event || is_aql) {
     q.err_watch_ctx = KFD_TRY(detail::Box<QueueErrorCtx>::create(QueueErrorCtx{
         .ctx = &ctx,
         .err_payload = reinterpret_cast<uint64_t *>(&q.ctl()->err_payload),
         .queue_id = q.id,
         .gpu_id = dev.gpu_id(),
         .error = 0}));
+  }
+  if (q.err_event)
     KFD_CHECK(ctx.register_handler(*q.err_event, queue_error_handler,
                                    q.err_watch_ctx.get()));
-  }
 
-  if (is_compute) {
+  if (is_aql) {
+    amdq->id = q.id;
+
+    q.scratch_watch_ctx = KFD_TRY(detail::Box<ScratchCtx>::create());
+    auto *sctx = q.scratch_watch_ctx.get();
+    sctx->dev = &dev;
+    sctx->amd_queue = amdq;
+    sctx->inactive = &inactive->value;
+    sctx->ring = static_cast<const abi::DispatchPacket *>(q.ring.data());
+    sctx->ring_packets = ring_size / AQLQueue::PACKET_SIZE;
+    sctx->err = q.err_watch_ctx.get();
+    sctx->queue_id = q.id;
+    q.inactive_event = std::move(inactive_ev);
+    KFD_CHECK(ctx.register_handler(*q.inactive_event, inactive_handler, sctx));
+  } else if (is_compute) {
     auto raw_ev = KFD_TRY(Event::create(ctx));
     q.scratch_event = KFD_TRY(detail::Box<Event>::create(std::move(raw_ev)));
 
@@ -464,6 +624,8 @@ QueueBase::~QueueBase() {
     KFD_ASSERT(ctx->unregister_handler(*err_event));
   if (scratch_event)
     KFD_ASSERT(ctx->unregister_handler(*scratch_event));
+  if (inactive_event)
+    KFD_ASSERT(ctx->unregister_handler(*inactive_event));
 
   // Destroy the queue before releasing scratch. DESTROY_QUEUE preempts any
   // in-flight waves, so the scratch region is no longer referenced by the GPU
@@ -490,7 +652,9 @@ QueueBase::QueueBase(QueueBase &&other)
       err_watch_ctx(std::move(other.err_watch_ctx)),
       scratch_event(std::move(other.scratch_event)),
       scratch_watch_ctx(std::move(other.scratch_watch_ctx)),
+      inactive_event(std::move(other.inactive_event)),
       submit_mtx(std::move(other.submit_mtx)),
+      cu_mask_words(std::move(other.cu_mask_words)),
       pending_wptr(std::exchange(other.pending_wptr, 0)) {}
 
 QueueBase &QueueBase::operator=(QueueBase &&other) {
@@ -502,6 +666,8 @@ QueueBase &QueueBase::operator=(QueueBase &&other) {
       KFD_ASSERT(ctx->unregister_handler(*err_event));
     if (scratch_event)
       KFD_ASSERT(ctx->unregister_handler(*scratch_event));
+    if (inactive_event)
+      KFD_ASSERT(ctx->unregister_handler(*inactive_event));
     ioctl::kfd::destroy_queue_args dq{.queue_id = id};
     KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_QUEUE>(ctx->kfd_fd(), dq));
     if (scratch_watch_ctx && scratch_watch_ctx->scratch_va) {
@@ -526,7 +692,9 @@ QueueBase &QueueBase::operator=(QueueBase &&other) {
   err_watch_ctx = std::move(other.err_watch_ctx);
   scratch_event = std::move(other.scratch_event);
   scratch_watch_ctx = std::move(other.scratch_watch_ctx);
+  inactive_event = std::move(other.inactive_event);
   submit_mtx = std::move(other.submit_mtx);
+  cu_mask_words = std::move(other.cu_mask_words);
   pending_wptr = std::exchange(other.pending_wptr, 0);
   return *this;
 }
@@ -652,17 +820,9 @@ std::expected<ComputeQueue, Error> ComputeQueue::create(Device &dev,
   KFD_CHECK(eop_vram.map(dev));
 
   auto base = KFD_TRY(QueueBase::create(dev, QueueType::COMPUTE, ring_size,
-                                        target_xcc, priority));
+                                        priority, target_xcc));
 
   ComputeQueue q(std::move(base), std::move(eop_vram));
-
-  const NodeProperties &p = dev.properties();
-  uint32_t cu_count = p.simd_count / (p.simd_per_cu ? p.simd_per_cu : 1);
-  KFD_CHECK(q.cu_mask_words.resize(align_up(cu_count, 32u) / 32));
-  for (size_t i = 0; i < q.cu_mask_words.size(); ++i) {
-    uint32_t bits = cu_count - static_cast<uint32_t>(i) * 32;
-    q.cu_mask_words[i] = bits >= 32 ? 0xFFFFFFFF : (1u << bits) - 1;
-  }
 
   uint32_t init[2 * pm4::WRITE_DATA_DWORDS];
   auto *eop_u32 = static_cast<uint32_t *>(q.eop_seq.data());
@@ -682,11 +842,8 @@ uint32_t ComputeQueue::dispatch_impl(uint32_t *out, const Kernel &kernel,
   const abi::KernelDescriptor &kd = kernel.descriptor();
   uint32_t gfx = base.dev->gfx_version();
 
-  uint32_t private_segment_size = cfg.private_segment_size;
-  if (!(kd.kernel_code_properties & abi::USES_DYNAMIC_STACK))
-    private_segment_size = kd.private_segment_fixed_size;
-  else if (!private_segment_size)
-    private_segment_size = /*8 KiB=*/8 * 1024;
+  uint32_t private_segment_size =
+      private_segment_bytes(kd, cfg.private_segment_size);
 
   auto *sctx = base.scratch_watch_ctx.get();
   uint16_t props = kd.kernel_code_properties;
@@ -770,19 +927,18 @@ ComputeQueue::flush(const uint32_t *data, size_t dwords, uint64_t timeout_ns) {
 }
 
 std::expected<void, Error>
-ComputeQueue::set_cu_mask(std::span<const uint32_t> mask) {
+QueueBase::set_cu_mask(std::span<const uint32_t> mask) {
   if (mask.empty())
     return kfd::unexpected(EINVAL, "CU mask must not be empty");
 
   // Trim any tail past the device's CU count; those bits address nothing.
-  size_t words = detail::min(mask.size(), size_t{device_cu_words(*base.dev)});
+  size_t words = detail::min(mask.size(), size_t{device_cu_words(*dev)});
   ioctl::kfd::set_cu_mask_args args{
-      .queue_id = base.queue_id(),
+      .queue_id = queue_id(),
       .num_cu_mask = static_cast<uint32_t>(words * 32),
       .cu_mask_ptr = reinterpret_cast<uintptr_t>(mask.data()),
   };
-  KFD_CHECK(
-      ioctl::call<ioctl::kfd::SET_CU_MASK>(base.dev->context().kfd_fd(), args));
+  KFD_CHECK(ioctl::call<ioctl::kfd::SET_CU_MASK>(ctx->kfd_fd(), args));
 
   KFD_CHECK(cu_mask_words.resize(words));
   std::memcpy(cu_mask_words.data(), mask.data(), words * sizeof(uint32_t));
@@ -792,7 +948,7 @@ ComputeQueue::set_cu_mask(std::span<const uint32_t> mask) {
 std::expected<CooperativeQueue, Error>
 CooperativeQueue::create(Device &dev, size_t ring_size, uint32_t priority,
                          uint32_t target_xcc) {
-  auto cq = KFD_TRY(ComputeQueue::create(dev, ring_size, target_xcc, priority));
+  auto cq = KFD_TRY(ComputeQueue::create(dev, ring_size, priority, target_xcc));
 
   // GFX12+ uses GLG_EN in the dispatch packet itself, otherwise we need the GWS
   // ioctl to mark the queue as exclusively scheduled (non-preemptible).
@@ -813,18 +969,206 @@ CooperativeQueue::create(Device &dev, size_t ring_size, uint32_t priority,
   return CooperativeQueue(std::move(cq));
 }
 
+AmdQueue *QueueBase::amd_queue() const {
+  return reinterpret_cast<AmdQueue *>(static_cast<std::byte *>(control.data()) +
+                                      AMD_QUEUE_OFFSET);
+}
+
+std::expected<AQLQueue, Error> AQLQueue::create(Device &dev, size_t ring_size,
+                                                uint32_t priority,
+                                                uint32_t target_xcc) {
+  auto base = KFD_TRY(QueueBase::create(dev, QueueType::COMPUTE_AQL, ring_size,
+                                        priority, target_xcc));
+  return AQLQueue(std::move(base));
+}
+
+std::expected<void, Error> AQLQueue::submit(std::span<const std::byte> packets,
+                                            uint64_t timeout_ns) {
+  if (packets.empty())
+    return {};
+  if (packets.size() % PACKET_SIZE != 0)
+    return kfd::unexpected(EINVAL,
+                           "AQL submit of %zu bytes is not a multiple of %zu",
+                           packets.size(), PACKET_SIZE);
+
+  QueueErrorCtx *ectx = base.err_watch_ctx.get();
+  AmdQueue *q = base.amd_queue();
+  const uint64_t cap = q->size;
+  const uint64_t count = packets.size() / PACKET_SIZE;
+  if (count > cap)
+    return kfd::unexpected(
+        EMSGSIZE, "AQL submit of %zu packets exceeds ring of %zu",
+        static_cast<size_t>(count), static_cast<size_t>(cap));
+
+  // Reserve the whole run in one step, then publish each header in order.
+  // The doorbell rings once, with the index of the last packet.
+  uint64_t index = __atomic_load_n(&q->write_dispatch_id, __ATOMIC_RELAXED);
+  uint64_t last_rd = __atomic_load_n(&q->read_dispatch_id, __ATOMIC_ACQUIRE);
+  uint64_t deadline_ns = 0;
+  bool armed = false;
+  for (;;) {
+    if (ectx) {
+      if (uint64_t err = __atomic_load_n(&ectx->error, __ATOMIC_ACQUIRE))
+        return kfd::unexpected(ECANCELED,
+                               "queue %u faulted (code 0x%lx); reset required",
+                               base.id, static_cast<unsigned long>(err));
+    }
+
+    uint64_t rd = __atomic_load_n(&q->read_dispatch_id, __ATOMIC_ACQUIRE);
+    if (index - rd <= cap - count) {
+      if (__atomic_compare_exchange_n(&q->write_dispatch_id, &index,
+                                      index + count, /*weak=*/true,
+                                      __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        break;
+      continue;
+    }
+
+    if (timeout_ns != 0) {
+      struct timespec now;
+      ::clock_gettime(CLOCK_MONOTONIC, &now);
+      uint64_t now_ns = static_cast<uint64_t>(now.tv_sec) * 1'000'000'000 +
+                        static_cast<uint64_t>(now.tv_nsec);
+      if (!armed || rd != last_rd) {
+        last_rd = rd;
+        deadline_ns = now_ns + timeout_ns;
+        armed = true;
+      } else if (now_ns >= deadline_ns) {
+        return kfd::unexpected(
+            ETIMEDOUT, "AQL ring stall; no consumer progress on queue %u",
+            base.id);
+      }
+    }
+    detail::spin_hint();
+    index = __atomic_load_n(&q->write_dispatch_id, __ATOMIC_RELAXED);
+  }
+
+  // A slot is free once the read index passes it, but that does not order
+  // this write after the CP's INVALID store or the scratch handler's read.
+  __atomic_load_n(base.scratch_watch_ctx->inactive, __ATOMIC_ACQUIRE);
+  for (uint64_t n = 0; n < count; ++n) {
+    auto *slot = static_cast<std::byte *>(base.ring.data()) +
+                 ((index + n) & (cap - 1)) * PACKET_SIZE;
+    __atomic_load_n(reinterpret_cast<uint32_t *>(slot), __ATOMIC_ACQUIRE);
+
+    const auto *src = packets.data() + n * PACKET_SIZE;
+    std::memcpy(slot + sizeof(uint32_t), src + sizeof(uint32_t),
+                PACKET_SIZE - sizeof(uint32_t));
+    uint32_t header;
+    std::memcpy(&header, src, sizeof(header));
+    __atomic_store_n(reinterpret_cast<uint32_t *>(slot), header,
+                     __ATOMIC_RELEASE);
+  }
+  __atomic_store_n(base.doorbell, index + count - 1, __ATOMIC_RELEASE);
+  return {};
+}
+
+AQLQueue::CommandBuffer &AQLQueue::CommandBuffer::fail(Error error) {
+  if (!failed)
+    failed = std::move(error);
+  return *this;
+}
+
+AQLQueue::CommandBuffer &AQLQueue::CommandBuffer::append(const void *packet) {
+  if (failed)
+    return *this;
+  size_t off = packets.size();
+  if (auto grown = packets.resize_for_overwrite(off + PACKET_SIZE); !grown)
+    return fail(grown.error());
+  std::memcpy(packets.data() + off, packet, PACKET_SIZE);
+  return *this;
+}
+
+AQLQueue::CommandBuffer &AQLQueue::CommandBuffer::dispatch(
+    const Kernel &kernel, const DispatchConfig &cfg,
+    std::span<std::byte> kernarg, aql::Ordering order, Signal *completion) {
+  if (failed)
+    return *this;
+  if (cfg.grid_start.x || cfg.grid_start.y || cfg.grid_start.z ||
+      cfg.grid_count.x || cfg.grid_count.y || cfg.grid_count.z)
+    return fail(
+        kfd::unexpected(ENOTSUP, "AQL dispatch cannot launch a sub-grid")
+            .error());
+
+  auto fits = [](uint32_t block, uint32_t grid) {
+    return block <= UINT16_MAX && uint64_t(block) * grid <= UINT32_MAX;
+  };
+  if (!fits(cfg.block.x, cfg.grid.x) || !fits(cfg.block.y, cfg.grid.y) ||
+      !fits(cfg.block.z, cfg.grid.z))
+    return fail(
+        kfd::unexpected(EINVAL, "launch dimensions exceed AQL limits").error());
+
+  const abi::KernelDescriptor &kd = kernel.descriptor();
+  uint32_t private_segment_size =
+      private_segment_bytes(kd, cfg.private_segment_size);
+
+  abi::DispatchPacket pkt;
+  aql::kernel_dispatch(
+      pkt, cfg.grid, cfg.block, private_segment_size,
+      kd.group_segment_fixed_size + cfg.dynamic_lds,
+      reinterpret_cast<uintptr_t>(kernel.address()) -
+          static_cast<uint64_t>(kd.kernel_code_entry_byte_offset),
+      kernarg.data(), completion ? completion->completion_handle() : 0, order);
+  return append(&pkt);
+}
+
+// Each barrier packet holds back the queue until it completes, so a chain of
+// them waits on every dependency.
+AQLQueue::CommandBuffer &
+AQLQueue::CommandBuffer::barrier(std::span<Signal *const> deps,
+                                 aql::Ordering order, Signal *completion) {
+  if (failed)
+    return *this;
+  size_t i = 0;
+  do {
+    uint64_t handles[aql::BARRIER_AND_DEPS] = {};
+    size_t n = 0;
+    for (; n < aql::BARRIER_AND_DEPS && i < deps.size(); ++n, ++i)
+      handles[n] = deps[i]->completion_handle();
+    bool last = i == deps.size();
+    aql::BarrierAndPacket pkt;
+    aql::barrier_and(pkt, {handles, n},
+                     last && completion ? completion->completion_handle() : 0,
+                     order);
+    append(&pkt);
+  } while (i < deps.size() && !failed);
+  return *this;
+}
+
+AQLQueue::CommandBuffer &AQLQueue::CommandBuffer::pm4(const void *ib,
+                                                      uint32_t dwords,
+                                                      Signal &completion) {
+  if (failed)
+    return *this;
+  uint32_t jump[pm4::INDIRECT_BUFFER_DWORDS];
+  pm4::indirect_buffer(jump, ib, dwords);
+  // Clear the PM4 packet format header when we send this through AQL, it
+  // doesn't like it for some reason.
+  jump[0] &= ~(1u << 1);
+  aql::Pm4IndirectPacket pkt;
+  aql::pm4_indirect(pkt, jump, completion.completion_handle());
+  return append(&pkt);
+}
+
+std::expected<void, Error>
+AQLQueue::CommandBuffer::submit(uint64_t timeout_ns) {
+  if (failed)
+    return kfd::unexpected(*failed);
+  return queue.submit(
+      std::span<const std::byte>(packets.data(), packets.size()), timeout_ns);
+}
+
 // SDMA queues execute packets in-order to copy between PCI-e or XGMI.
 std::expected<SDMAQueue, Error> SDMAQueue::create(Device &dev, size_t ring_size,
                                                   uint32_t priority) {
   auto base = KFD_TRY(QueueBase::create(dev, QueueType::SDMA, ring_size,
-                                        /*target_xcc=*/0, priority));
+                                        priority, /*target_xcc=*/0));
   return SDMAQueue(std::move(base));
 }
 
 std::expected<XGMIQueue, Error> XGMIQueue::create(Device &dev, size_t ring_size,
                                                   uint32_t priority) {
   auto base = KFD_TRY(QueueBase::create(dev, QueueType::SDMA_XGMI, ring_size,
-                                        /*target_xcc=*/0, priority));
+                                        priority, /*target_xcc=*/0));
   return XGMIQueue(std::move(base));
 }
 

@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "libkfd/context.h"
+#include "amd_queue.h"
 #include "ioctl.h"
 #include "libkfd/event.h"
 #include "libkfd/memory.h"
@@ -66,7 +67,7 @@ std::expected<SignalPage, Error> alloc_signal_page(SmallVector<Device, 4> &devs,
 
 // Backing memory for the signal system, intentionally leaked once per-process.
 uint64_t *event_page = nullptr;
-uint64_t *fence_page = nullptr;
+CompletionSignal *fence_page = nullptr;
 Mutex signal_page_mtx{};
 
 // KFD runtime exception delivery, enabled once per-process.
@@ -113,6 +114,12 @@ void default_fault_handler(const FaultInfo &f, void *) {
       break;
     case QueueError::Kind::Abort:
       what = "abort";
+      break;
+    case QueueError::Kind::InvalidPacket:
+      what = "invalid-packet";
+      break;
+    case QueueError::Kind::OutOfResources:
+      what = "out-of-resources";
       break;
     case QueueError::Kind::Trap:
     case QueueError::Kind::None:
@@ -507,7 +514,7 @@ std::expected<Context, Error> Context::create() {
       constexpr size_t EVENT_PAGE_SIZE =
           KFD_SIGNAL_EVENT_LIMIT * sizeof(uint64_t);
       constexpr size_t FENCE_PAGE_SIZE =
-          KFD_SIGNAL_EVENT_LIMIT * sizeof(uint64_t);
+          KFD_SIGNAL_EVENT_LIMIT * sizeof(CompletionSignal);
 
       auto ep = KFD_TRY(alloc_signal_page(ctx.nodes, EVENT_PAGE_SIZE));
 
@@ -532,7 +539,7 @@ std::expected<Context, Error> Context::create() {
       }
 
       // Indices to these are handled by the KFD event interface.
-      __atomic_store_n(&fence_page, static_cast<uint64_t *>(fp->addr),
+      __atomic_store_n(&fence_page, static_cast<CompletionSignal *>(fp->addr),
                        __ATOMIC_RELEASE);
       __atomic_store_n(&event_page, static_cast<uint64_t *>(ep.addr),
                        __ATOMIC_RELEASE);
@@ -619,11 +626,14 @@ std::expected<uint64_t *, Error> Context::event_slot(uint32_t id) {
   return &__atomic_load_n(&event_page, __ATOMIC_ACQUIRE)[id];
 }
 
-std::expected<uint64_t *, Error> Context::fence_slot(uint32_t id) {
+std::expected<uint64_t *, Error> Context::fence_slot(const Event &event) {
+  uint32_t id = event.slot_index();
   if (id >= KFD_SIGNAL_EVENT_LIMIT)
     return kfd::unexpected(EINVAL, "fence id %u >= limit %u", id,
                            static_cast<unsigned>(KFD_SIGNAL_EVENT_LIMIT));
-  return &__atomic_load_n(&fence_page, __ATOMIC_ACQUIRE)[id];
+  CompletionSignal &slot = __atomic_load_n(&fence_page, __ATOMIC_ACQUIRE)[id];
+  slot.bind(event);
+  return &slot.value;
 }
 
 std::expected<void, Error>

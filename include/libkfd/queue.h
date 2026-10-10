@@ -2,9 +2,9 @@
 //
 // Queues are the primary way to interact with the device's command processor.
 // These are simple ring buffers that submit packets to the device from user
-// space. PM4 compute queues modify memory and register state while SDMA queues
-// handle memory movement. Queue submission is handled through ringing MMIO
-// doorbell pages.
+// space. PM4 compute queues modify memory and register state, AQL queues hand
+// fixed-size HSA packets to the CP firmware, and SDMA queues handle memory
+// movement. Queue submission is handled through ringing MMIO doorbell pages.
 //
 //===----------------------------------------------------------------------===//
 
@@ -19,6 +19,7 @@
 #include "libkfd/device.h"
 #include "libkfd/loader.h"
 #include "libkfd/memory.h"
+#include "libkfd/packets/aql.h"
 #include "libkfd/packets/pm4.h"
 #include "libkfd/packets/sdma.h"
 #include "libkfd/signal.h"
@@ -27,17 +28,20 @@
 
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <span>
 
 namespace kfd {
 
 class Context;
+struct AmdQueue;
 struct QueueErrorCtx;
 struct ScratchCtx;
 
 enum class QueueType : uint8_t {
   COMPUTE = /*KFD_IOC_QUEUE_TYPE_COMPUTE=*/0x0,
   SDMA = /*KFD_IOC_QUEUE_TYPE_SDMA=*/0x1,
+  COMPUTE_AQL = /*KFD_IOC_QUEUE_TYPE_COMPUTE_AQL=*/0x2,
   SDMA_XGMI = /*KFD_IOC_QUEUE_TYPE_SDMA_XGMI=*/0x3,
 };
 
@@ -79,6 +83,7 @@ public:
 
 private:
   friend class ComputeQueue;
+  friend class AQLQueue;
   friend class SDMAQueue;
   friend class XGMIQueue;
 
@@ -109,6 +114,11 @@ private:
     uint32_t indirect[MAX_SCRATCH_IB_DWORDS];
   };
 
+  // AQL queues place the CP-visible amd_queue_t after the control block. Its
+  // read and write dispatch IDs replace the control block's ring pointers.
+  static constexpr size_t AMD_QUEUE_OFFSET =
+      detail::align_up(sizeof(QueueControl), size_t(64));
+
   static std::expected<QueueBase, Error>
   create(Device &dev, QueueType type, size_t ring_size,
          uint32_t priority = DEFAULT_PRIORITY, uint32_t target_xcc = 0);
@@ -129,14 +139,20 @@ private:
   QueueControl *ctl() const {
     return static_cast<QueueControl *>(control.data());
   }
+  AmdQueue *amd_queue() const;
   bool is_sdma() const {
     return type == QueueType::SDMA || type == QueueType::SDMA_XGMI;
+  }
+  std::expected<void, Error> set_cu_mask(std::span<const uint32_t> mask);
+  std::span<const uint32_t> cu_mask() const {
+    return {cu_mask_words.data(), cu_mask_words.size()};
   }
   std::expected<void, Error>
   wait_for_room(uint32_t dwords,
                 uint64_t timeout_ns = DEFAULT_SUBMIT_TIMEOUT_NS);
   static bool queue_error_handler(void *user_data);
   static bool scratch_handler(void *user_data);
+  static bool inactive_handler(void *user_data);
   static bool scratch_grow(ScratchCtx *sctx, uint32_t needed_perwave,
                            uint32_t threads_per_group);
 
@@ -156,7 +172,9 @@ private:
   detail::Box<QueueErrorCtx> err_watch_ctx;
   detail::Box<Event> scratch_event;
   detail::Box<ScratchCtx> scratch_watch_ctx;
+  detail::Box<Event> inactive_event;
   detail::Mutex submit_mtx;
+  detail::SmallVector<uint32_t, 8> cu_mask_words;
 
   uint64_t pending_wptr = 0;
 };
@@ -167,8 +185,8 @@ class ComputeQueue {
 public:
   static std::expected<ComputeQueue, Error>
   create(Device &dev, size_t ring_size = 4ul * detail::page_size(),
-         uint32_t target_xcc = 0,
-         uint32_t priority = QueueBase::DEFAULT_PRIORITY);
+         uint32_t priority = QueueBase::DEFAULT_PRIORITY,
+         uint32_t target_xcc = 0);
 
   ~ComputeQueue() = default;
 
@@ -449,11 +467,11 @@ public:
     return command().dispatch(kernel, cfg, kernarg).submit();
   }
 
-  // Sets the bitfield controlling with CUs workgroups can be dispatched to.
-  std::expected<void, Error> set_cu_mask(std::span<const uint32_t> mask);
-  std::span<const uint32_t> cu_mask() const {
-    return {cu_mask_words.data(), cu_mask_words.size()};
+  // Sets the bitfield controlling which CUs workgroups can be dispatched to.
+  std::expected<void, Error> set_cu_mask(std::span<const uint32_t> mask) {
+    return base.set_cu_mask(mask);
   }
+  std::span<const uint32_t> cu_mask() const { return base.cu_mask(); }
 
   uint32_t gfx_version() const { return base.dev->gfx_version(); }
   uint32_t queue_id() const { return base.queue_id(); }
@@ -487,7 +505,6 @@ private:
   Buffer eop_seq;
   QueueBase base;
   bool cooperative = false;
-  detail::SmallVector<uint32_t, 8> cu_mask_words;
 };
 
 // A compute queue that is exclusively scheduled (non-preemptible). Dispatches
@@ -503,6 +520,119 @@ private:
   explicit CooperativeQueue(ComputeQueue &&cq) : ComputeQueue(std::move(cq)) {
     cooperative = true;
   }
+};
+
+// High level interface into an AQL queue used to present work to the device
+// according to the HSA standard.
+class AQLQueue {
+public:
+  static constexpr size_t PACKET_SIZE = 64;
+
+  static std::expected<AQLQueue, Error>
+  create(Device &dev, size_t ring_size = 4ul * detail::page_size(),
+         uint32_t priority = QueueBase::DEFAULT_PRIORITY,
+         uint32_t target_xcc = 0);
+
+  ~AQLQueue() = default;
+
+  AQLQueue(const AQLQueue &) = delete;
+  AQLQueue &operator=(const AQLQueue &) = delete;
+  AQLQueue(AQLQueue &&) = default;
+  AQLQueue &operator=(AQLQueue &&) = default;
+
+  // Records different AQL packets and submits them with one doorbell.
+  // submit() replays the same recording.
+  class CommandBuffer {
+  public:
+    CommandBuffer(const CommandBuffer &) = delete;
+    CommandBuffer &operator=(const CommandBuffer &) = delete;
+    CommandBuffer(CommandBuffer &&) = default;
+
+    CommandBuffer &dispatch(const Kernel &kernel, const DispatchConfig &cfg,
+                            std::span<std::byte> kernarg,
+                            aql::Ordering order = {},
+                            Signal *completion = nullptr);
+
+    // Later packets wait until every signal in 'deps' reaches zero. If
+    // non-null, 'completion' is decremented afterwards.
+    CommandBuffer &barrier(std::span<Signal *const> deps,
+                           aql::Ordering order = {},
+                           Signal *completion = nullptr);
+
+    // Vendor packet that runs a PM4 indirect buffer, then decrements
+    // 'completion'.
+    CommandBuffer &pm4(const void *ib, uint32_t dwords, Signal &completion);
+
+    std::expected<void, Error>
+    submit(uint64_t timeout_ns = QueueBase::DEFAULT_SUBMIT_TIMEOUT_NS);
+
+    void reset() {
+      packets.clear();
+      failed.reset();
+    }
+    size_t size() const { return packets.size() / PACKET_SIZE; }
+    bool empty() const { return packets.empty(); }
+
+  private:
+    friend class AQLQueue;
+
+    explicit CommandBuffer(AQLQueue &queue) : queue(queue) {}
+
+    CommandBuffer &append(const void *packet);
+    CommandBuffer &fail(Error error);
+
+    AQLQueue &queue;
+    detail::SmallVector<std::byte, 256> packets;
+    std::optional<Error> failed;
+  };
+
+  CommandBuffer command() { return CommandBuffer(*this); }
+
+  // Launches a kernel on the device.
+  std::expected<void, Error> dispatch(const Kernel &kernel,
+                                      const DispatchConfig &cfg,
+                                      std::span<std::byte> kernarg,
+                                      aql::Ordering order = {},
+                                      Signal *completion = nullptr) {
+    return command().dispatch(kernel, cfg, kernarg, order, completion).submit();
+  }
+
+  // Holds back later packets until every signal in 'deps' reaches zero. If
+  // non-null, 'completion' is decremented afterwards.
+  std::expected<void, Error> barrier(std::span<Signal *const> deps,
+                                     aql::Ordering order = {},
+                                     Signal *completion = nullptr) {
+    return command().barrier(deps, order, completion).submit();
+  }
+
+  // Copies complete 64-byte AQL packets into the ring and rings the doorbell
+  // once. The ring stays inside the queue; the scratch and inactive handlers
+  // write it. 'packets' is empty or a multiple of PACKET_SIZE, and no larger
+  // than the ring.
+  std::expected<void, Error>
+  submit(std::span<const std::byte> packets,
+         uint64_t timeout_ns = QueueBase::DEFAULT_SUBMIT_TIMEOUT_NS);
+
+  // Launch a PM4 packet stream via an indirect buffer.
+  std::expected<void, Error> submit_pm4(const void *ib, uint32_t dwords,
+                                        Signal &completion) {
+    return command().pm4(ib, dwords, completion).submit();
+  }
+
+  // Sets the bitfield controlling which CUs workgroups can be dispatched to.
+  std::expected<void, Error> set_cu_mask(std::span<const uint32_t> mask) {
+    return base.set_cu_mask(mask);
+  }
+  std::span<const uint32_t> cu_mask() const { return base.cu_mask(); }
+
+  uint32_t gfx_version() const { return base.dev->gfx_version(); }
+  uint32_t queue_id() const { return base.queue_id(); }
+  explicit operator bool() const { return static_cast<bool>(base); }
+
+private:
+  explicit AQLQueue(QueueBase &&b) : base(std::move(b)) {}
+
+  QueueBase base;
 };
 
 // A queue used to copy memory between pinned CPU memory and VRAM.
