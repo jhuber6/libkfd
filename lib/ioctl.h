@@ -49,6 +49,8 @@ using set_xnack_mode_args = ::kfd_ioctl_set_xnack_mode_args;
 using set_trap_handler_args = ::kfd_ioctl_set_trap_handler_args;
 using runtime_enable_args = ::kfd_ioctl_runtime_enable_args;
 using export_dmabuf_args = ::kfd_ioctl_export_dmabuf_args;
+using get_dmabuf_info_args = ::kfd_ioctl_get_dmabuf_info_args;
+using import_dmabuf_args = ::kfd_ioctl_import_dmabuf_args;
 using alloc_queue_gws_args = ::kfd_ioctl_alloc_queue_gws_args;
 using set_cu_mask_args = ::kfd_ioctl_set_cu_mask_args;
 
@@ -79,6 +81,8 @@ inline constexpr unsigned long SET_XNACK_MODE = AMDKFD_IOC_SET_XNACK_MODE;
 inline constexpr unsigned long SET_TRAP_HANDLER = AMDKFD_IOC_SET_TRAP_HANDLER;
 inline constexpr unsigned long RUNTIME_ENABLE = AMDKFD_IOC_RUNTIME_ENABLE;
 inline constexpr unsigned long EXPORT_DMABUF = AMDKFD_IOC_EXPORT_DMABUF;
+inline constexpr unsigned long GET_DMABUF_INFO = AMDKFD_IOC_GET_DMABUF_INFO;
+inline constexpr unsigned long IMPORT_DMABUF = AMDKFD_IOC_IMPORT_DMABUF;
 inline constexpr unsigned long ALLOC_QUEUE_GWS = AMDKFD_IOC_ALLOC_QUEUE_GWS;
 inline constexpr unsigned long SET_CU_MASK = AMDKFD_IOC_SET_CU_MASK;
 

@@ -283,6 +283,65 @@ std::expected<void, Error> Buffer::unmap(std::span<Device *const> targets) {
   return {};
 }
 
+std::expected<DMABufInfo, Error> DMABuffer::info(Context &ctx, int fd) {
+  if (fd < 0)
+    return kfd::unexpected(EINVAL, "dmabuf fd %d", fd);
+
+  ioctl::kfd::get_dmabuf_info_args args{
+      .dmabuf_fd = static_cast<uint32_t>(fd),
+  };
+  KFD_CHECK(ioctl::call<ioctl::kfd::GET_DMABUF_INFO>(ctx.kfd_fd(), args));
+
+  uint32_t flags = args.flags;
+  bool vram = flags & KFD_IOC_ALLOC_MEM_FLAGS_VRAM;
+  bool gtt = flags & KFD_IOC_ALLOC_MEM_FLAGS_GTT;
+  if (vram == gtt)
+    return kfd::unexpected(EINVAL, "dmabuf flags 0x%x have no memory domain",
+                           flags);
+
+  return DMABufInfo{
+      .size = static_cast<size_t>(args.size),
+      .gpu_id = args.gpu_id,
+      .type = vram ? MemType::VRAM : MemType::GTT,
+  };
+}
+
+std::expected<Buffer, Error> Buffer::import(Context &ctx, int dmabuf_fd) {
+  auto info = KFD_TRY(DMABuffer::info(ctx, dmabuf_fd));
+  if (info.size == 0)
+    return kfd::unexpected(EINVAL, "dmabuf is empty");
+
+  Device *owner = nullptr;
+  for (Device &dev : ctx.devices()) {
+    if (dev.gpu_id() == info.gpu_id) {
+      owner = &dev;
+      break;
+    }
+  }
+  if (!owner)
+    return kfd::unexpected(ENODEV, "dmabuf gpu_id %u is not in this context",
+                           info.gpu_id);
+
+  // Import the DMA-BUF file descriptor into a new VA reservation and register.
+  auto reservation = KFD_TRY(MappedRegion::reserve(info.size));
+  auto mapped =
+      reservation.rebind(dmabuf_fd, PROT_READ | PROT_WRITE, /*offset=*/0);
+  if (mapped)
+    reservation = std::move(*mapped);
+  else if (mapped.error().code != EPERM)
+    return kfd::unexpected(mapped.error());
+
+  ioctl::kfd::import_dmabuf_args args{
+      .va_addr = reinterpret_cast<uintptr_t>(reservation.data()),
+      .gpu_id = info.gpu_id,
+      .dmabuf_fd = static_cast<uint32_t>(dmabuf_fd),
+  };
+  if (auto r = ioctl::call<ioctl::kfd::IMPORT_DMABUF>(ctx.kfd_fd(), args); !r)
+    return kfd::unexpected(r.error());
+
+  return Buffer(args.handle, info.size, std::move(reservation), {}, owner, {});
+}
+
 std::expected<DMABuffer, Error> DMABuffer::create(Buffer &buf, uint32_t flags) {
   if (!buf)
     return kfd::unexpected(EINVAL, "export_dmabuf called on null buffer");

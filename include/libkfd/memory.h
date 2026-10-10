@@ -92,6 +92,10 @@ public:
   register_host(Device &dev, void *ptr, size_t size,
                 MemFlags flags = MemFlags::WRITABLE);
 
+  // Import a dma-buf as a buffer on the device that owns it. The fd is not
+  // closed; the kernel holds its own reference after this returns.
+  static std::expected<Buffer, Error> import(Context &ctx, int dmabuf_fd);
+
   // Map this buffer to the device's page tables. Must be done before accessing.
   std::expected<void, Error> map(std::span<Device *const> targets);
   std::expected<void, Error> map(Device &device);
@@ -147,8 +151,14 @@ private:
   Device *dev = nullptr;
 };
 
-// Get a DMA buffer interface to an existing buffer object. Exposes the standard
-// POSIX file interface over the device memory.
+// Placement of a dma-buf, as reported by KFD.
+struct DMABufInfo {
+  size_t size = 0;
+  uint32_t gpu_id = 0;
+  MemType type = MemType::GTT;
+};
+
+// A dma-buf file descriptor for a buffer. create() exports one.
 class DMABuffer {
 public:
   DMABuffer() = default;
@@ -156,6 +166,9 @@ public:
 
   static std::expected<DMABuffer, Error> create(Buffer &buf,
                                                 uint32_t flags = 0);
+
+  // Size, owning gpu_id, and placement of a dma-buf. Does not import it.
+  static std::expected<DMABufInfo, Error> info(Context &ctx, int fd);
 
   DMABuffer(const DMABuffer &) = delete;
   DMABuffer &operator=(const DMABuffer &) = delete;
