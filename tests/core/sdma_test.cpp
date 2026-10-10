@@ -194,3 +194,76 @@ TEST_CASE("SDMA - multiple submissions across ring wrap", "[sdma][stress]") {
     }
   }
 }
+
+TEST_CASE("SDMA - a command buffer submits once", "[sdma]") {
+  auto &ctx = require_ctx();
+
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = require_gpu(ctx, di);
+
+      auto queue = kfd::test::create_queue<kfd::SDMAQueue>(gpu);
+      REQUIRE_RESULT(queue);
+
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
+
+      constexpr uint32_t N = 64;
+      constexpr size_t BYTES = N * sizeof(uint32_t);
+      auto src = alloc_host_buffer(gpu);
+      auto dst = alloc_host_buffer(gpu);
+      std::memset(src.data(), 0, src.size());
+      std::memset(dst.data(), 0, dst.size());
+
+      auto cmd = queue->command();
+      cmd.const_fill(src.data(), 0x11111111, BYTES);
+      cmd.copy_linear(dst.data(), src.data(), BYTES);
+      cmd.signal(*sig);
+      REQUIRE_RESULT(cmd.submit());
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+
+      auto *out = static_cast<volatile uint32_t *>(dst.data());
+      for (uint32_t i = 0; i < N; ++i)
+        CHECK(out[i] == 0x11111111);
+
+      REQUIRE_RESULT(sig->reset());
+      static_cast<uint32_t *>(dst.data())[0] = 0;
+      REQUIRE_RESULT(cmd.submit());
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+      CHECK(out[0] == 0x11111111);
+    }
+  }
+}
+
+TEST_CASE("SDMA - engine id selects a PCIe engine", "[sdma]") {
+  auto &ctx = require_ctx();
+
+  for (size_t di = 0; di < ctx.num_devices(); ++di) {
+    DYNAMIC_SECTION("device " << di) {
+      auto &gpu = require_gpu(ctx, di);
+      uint32_t engines = gpu.properties().num_sdma_engines;
+
+      auto bad =
+          kfd::SDMAQueue::create(gpu, kfd::detail::page_size(),
+                                 kfd::QueueBase::DEFAULT_PRIORITY, engines);
+      CHECK(!bad);
+      CHECK(bad.error().code == EINVAL);
+
+      if (engines == 0)
+        continue;
+
+      auto queue = kfd::test::create_queue<kfd::SDMAQueue>(
+          gpu, kfd::detail::page_size(), kfd::QueueBase::DEFAULT_PRIORITY,
+          std::optional<uint32_t>{0});
+      REQUIRE_RESULT(queue);
+
+      auto sig = kfd::Signal::create(ctx);
+      REQUIRE_RESULT(sig);
+      REQUIRE_RESULT(queue->signal(*sig));
+      REQUIRE_RESULT(
+          sig->wait(kfd::Condition::EQ, 0, kfd::test::WAIT_TIMEOUT_NS));
+    }
+  }
+}

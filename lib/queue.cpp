@@ -31,6 +31,8 @@ static_assert(static_cast<uint8_t>(kfd::QueueType::COMPUTE_AQL) ==
               KFD_IOC_QUEUE_TYPE_COMPUTE_AQL);
 static_assert(static_cast<uint8_t>(kfd::QueueType::SDMA_XGMI) ==
               KFD_IOC_QUEUE_TYPE_SDMA_XGMI);
+static_assert(static_cast<uint8_t>(kfd::QueueType::SDMA_BY_ENG_ID) ==
+              KFD_IOC_QUEUE_TYPE_SDMA_BY_ENG_ID);
 
 using namespace kfd::detail;
 
@@ -350,11 +352,16 @@ bool QueueBase::inactive_handler(void *user_data) {
 
 // Create a queue to communicate with the device's command processor. Each queue
 // is a ring buffer that consumes variable length packets for the processor.
-std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
-                                                  size_t ring_size,
-                                                  uint32_t priority,
-                                                  uint32_t target_xcc) {
+std::expected<QueueBase, Error>
+QueueBase::create(Device &dev, QueueType type, size_t ring_size,
+                  uint32_t priority, uint32_t target_xcc,
+                  std::optional<uint32_t> engine_id) {
   Context &ctx = dev.context();
+  if (engine_id) {
+    if (type != QueueType::SDMA && type != QueueType::SDMA_XGMI)
+      return kfd::unexpected(EINVAL, "engine id requires an SDMA queue");
+    type = QueueType::SDMA_BY_ENG_ID;
+  }
   if (!std::has_single_bit(ring_size))
     return kfd::unexpected(EINVAL, "ring size %zu is not a power of two",
                            ring_size);
@@ -507,6 +514,7 @@ std::expected<QueueBase, Error> QueueBase::create(Device &dev, QueueType type,
       .queue_type = static_cast<uint32_t>(type),
       .queue_percentage = (target_xcc << 8) | 100,
       .queue_priority = priority,
+      .sdma_engine_id = engine_id.value_or(0),
   };
   if (is_compute) {
     args.eop_buffer_address = reinterpret_cast<uintptr_t>(eop_buf.data());
@@ -1158,17 +1166,29 @@ AQLQueue::CommandBuffer::submit(uint64_t timeout_ns) {
 }
 
 // SDMA queues execute packets in-order to copy between PCI-e or XGMI.
-std::expected<SDMAQueue, Error> SDMAQueue::create(Device &dev, size_t ring_size,
-                                                  uint32_t priority) {
+std::expected<SDMAQueue, Error>
+SDMAQueue::create(Device &dev, size_t ring_size, uint32_t priority,
+                  std::optional<uint32_t> engine_id) {
+  uint32_t engines = dev.properties().num_sdma_engines;
+  if (engine_id && *engine_id >= engines)
+    return kfd::unexpected(EINVAL,
+                           "SDMA engine %u is outside the %u PCIe engines",
+                           *engine_id, engines);
   auto base = KFD_TRY(QueueBase::create(dev, QueueType::SDMA, ring_size,
-                                        priority, /*target_xcc=*/0));
+                                        priority, /*target_xcc=*/0, engine_id));
   return SDMAQueue(std::move(base));
 }
 
-std::expected<XGMIQueue, Error> XGMIQueue::create(Device &dev, size_t ring_size,
-                                                  uint32_t priority) {
+std::expected<XGMIQueue, Error>
+XGMIQueue::create(Device &dev, size_t ring_size, uint32_t priority,
+                  std::optional<uint32_t> engine_id) {
+  uint32_t pcie = dev.properties().num_sdma_engines;
+  uint32_t xgmi = dev.properties().num_sdma_xgmi_engines;
+  if (engine_id && (*engine_id < pcie || *engine_id >= pcie + xgmi))
+    return kfd::unexpected(EINVAL, "XGMI engine %u is outside [%u, %u)",
+                           *engine_id, pcie, pcie + xgmi);
   auto base = KFD_TRY(QueueBase::create(dev, QueueType::SDMA_XGMI, ring_size,
-                                        priority, /*target_xcc=*/0));
+                                        priority, /*target_xcc=*/0, engine_id));
   return XGMIQueue(std::move(base));
 }
 

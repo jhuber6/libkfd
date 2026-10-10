@@ -43,6 +43,7 @@ enum class QueueType : uint8_t {
   SDMA = /*KFD_IOC_QUEUE_TYPE_SDMA=*/0x1,
   COMPUTE_AQL = /*KFD_IOC_QUEUE_TYPE_COMPUTE_AQL=*/0x2,
   SDMA_XGMI = /*KFD_IOC_QUEUE_TYPE_SDMA_XGMI=*/0x3,
+  SDMA_BY_ENG_ID = /*KFD_IOC_QUEUE_TYPE_SDMA_BY_ENG_ID=*/0x4,
 };
 
 // Shared kernel-facing queue state. ComputeQueue and SDMAQueue each hold one
@@ -121,7 +122,8 @@ private:
 
   static std::expected<QueueBase, Error>
   create(Device &dev, QueueType type, size_t ring_size,
-         uint32_t priority = DEFAULT_PRIORITY, uint32_t target_xcc = 0);
+         uint32_t priority = DEFAULT_PRIORITY, uint32_t target_xcc = 0,
+         std::optional<uint32_t> engine_id = std::nullopt);
 
   QueueBase() = default;
   QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
@@ -141,7 +143,8 @@ private:
   }
   AmdQueue *amd_queue() const;
   bool is_sdma() const {
-    return type == QueueType::SDMA || type == QueueType::SDMA_XGMI;
+    return type == QueueType::SDMA || type == QueueType::SDMA_XGMI ||
+           type == QueueType::SDMA_BY_ENG_ID;
   }
   std::expected<void, Error> set_cu_mask(std::span<const uint32_t> mask);
   std::span<const uint32_t> cu_mask() const {
@@ -540,8 +543,6 @@ public:
   AQLQueue(AQLQueue &&) = default;
   AQLQueue &operator=(AQLQueue &&) = default;
 
-  // Records different AQL packets and submits them with one doorbell.
-  // submit() replays the same recording.
   class CommandBuffer {
   public:
     CommandBuffer(const CommandBuffer &) = delete;
@@ -638,9 +639,11 @@ private:
 // A queue used to copy memory between pinned CPU memory and VRAM.
 class SDMAQueue {
 public:
+  // Specifying the engine ID pins the queue to the enumerated hardware slot.
   static std::expected<SDMAQueue, Error>
   create(Device &dev, size_t ring_size = detail::page_size(),
-         uint32_t priority = QueueBase::DEFAULT_PRIORITY);
+         uint32_t priority = QueueBase::DEFAULT_PRIORITY,
+         std::optional<uint32_t> engine_id = std::nullopt);
 
   ~SDMAQueue() = default;
 
@@ -649,91 +652,174 @@ public:
   SDMAQueue(SDMAQueue &&) = default;
   SDMAQueue &operator=(SDMAQueue &&) = default;
 
+  class CommandBuffer {
+  public:
+    CommandBuffer(const CommandBuffer &) = delete;
+    CommandBuffer &operator=(const CommandBuffer &) = delete;
+    CommandBuffer(CommandBuffer &&) = default;
+
+    // Host memory must be in pinned or GTT memory to qualify for DMA transfers.
+    CommandBuffer &copy_linear(void *dst, const void *src, size_t bytes) {
+      const uint32_t max_bytes = sdma::max_copy_linear_bytes(gfx());
+      auto *d = static_cast<char *>(dst);
+      auto *s = static_cast<const char *>(src);
+      while (bytes) {
+        uint32_t chunk =
+            static_cast<uint32_t>(bytes < max_bytes ? bytes : max_bytes);
+        uint32_t buf[sdma::COPY_LINEAR_DWORDS];
+        sdma::copy_linear(buf, d, s, chunk);
+        append(buf, sdma::COPY_LINEAR_DWORDS);
+        d += chunk;
+        s += chunk;
+        bytes -= chunk;
+      }
+      return *this;
+    }
+
+    CommandBuffer &const_fill(void *dst, uint32_t value, size_t bytes) {
+      const uint32_t max_bytes = sdma::max_copy_linear_bytes(gfx()) & ~3u;
+      auto *d = static_cast<char *>(dst);
+      while (bytes) {
+        uint32_t chunk =
+            static_cast<uint32_t>(bytes < max_bytes ? bytes : max_bytes);
+        uint32_t buf[sdma::CONST_FILL_DWORDS];
+        sdma::const_fill(buf, gfx(), d, value, chunk);
+        append(buf, sdma::CONST_FILL_DWORDS);
+        d += chunk;
+        bytes -= chunk;
+      }
+      return *this;
+    }
+
+    CommandBuffer &fence(void *addr, uint32_t value) {
+      uint32_t buf[sdma::FENCE_DWORDS];
+      sdma::fence(buf, gfx(), addr, value);
+      return append(buf, sdma::FENCE_DWORDS);
+    }
+
+    CommandBuffer &flush_caches(uint32_t gcr_cntl = sdma::GCR_FLUSH_ALL) {
+      if (gfx() < abi::GFX_VERSION_GFX10_1)
+        return *this;
+      uint32_t buf[sdma::GCR_REQ_DWORDS];
+      sdma::gcr_req(buf, gcr_cntl);
+      return append(buf, sdma::GCR_REQ_DWORDS);
+    }
+
+    CommandBuffer &poll_regmem(void *addr, Condition cond, uint32_t reference,
+                               uint32_t mask = 0xFFFFFFFF) {
+      uint32_t buf[sdma::POLL_REGMEM_DWORDS];
+      sdma::poll_regmem(buf, addr, cond, reference, mask);
+      return append(buf, sdma::POLL_REGMEM_DWORDS);
+    }
+
+    CommandBuffer &timestamp(void *addr) {
+      uint32_t buf[sdma::TIMESTAMP_DWORDS];
+      sdma::timestamp(buf, addr);
+      return append(buf, sdma::TIMESTAMP_DWORDS);
+    }
+
+    CommandBuffer &atomic_mem(sdma::AtomicOp op, void *addr, int64_t src_data,
+                              int64_t cmp_data = 0) {
+      uint32_t buf[sdma::ATOMIC_DWORDS];
+      sdma::atomic_mem(buf, op, addr, src_data, cmp_data);
+      return append(buf, sdma::ATOMIC_DWORDS);
+    }
+
+    // Decrements the signal's value and fires an event once the preceding work
+    // has finished. Flush the caches to ensure a coherent state at completion.
+    CommandBuffer &signal(Signal &sig) {
+      uint32_t buf[sdma::GCR_REQ_DWORDS + sdma::ATOMIC_DWORDS +
+                   sdma::FENCE_DWORDS + sdma::TRAP_DWORDS];
+      uint32_t n = 0;
+      if (gfx() >= abi::GFX_VERSION_GFX10_1)
+        n += sdma::gcr_req(buf + n);
+      n += sdma::atomic_mem(buf + n, sdma::ATOMIC_ADD_64, sig.fence_addr(), -1);
+      n += sdma::fence(buf + n, gfx(), sig.signal_addr(), sig.event_id());
+      n += sdma::trap(buf + n, sig.trigger_data());
+      return append(buf, n);
+    }
+
+    // Stalls the engine until the fence satisfies the condition. SDMA has no
+    // 64-bit memory poll, so the compared value is 32-bit by construction.
+    CommandBuffer &wait(Signal &sig, Condition cond, uint32_t value) {
+      uint32_t buf[sdma::POLL_REGMEM_DWORDS];
+      sdma::poll_regmem(buf, sig.fence_addr(), cond, value);
+      return append(buf, sdma::POLL_REGMEM_DWORDS);
+    }
+
+    std::expected<void, Error>
+    submit(uint64_t timeout_ns = QueueBase::DEFAULT_SUBMIT_TIMEOUT_NS) {
+      return queue.submit_words(words.data(), words.size(), timeout_ns);
+    }
+
+    void reset() { words.clear(); }
+    size_t size() const { return words.size(); }
+    bool empty() const { return words.empty(); }
+
+  private:
+    friend class SDMAQueue;
+
+    explicit CommandBuffer(SDMAQueue &queue) : queue(queue) {}
+
+    uint32_t gfx() const { return queue.base.dev->gfx_version(); }
+
+    CommandBuffer &append(const uint32_t *data, uint32_t n) {
+      KFD_ASSERT(words.append(data, data + n));
+      return *this;
+    }
+
+    SDMAQueue &queue;
+    detail::SmallVector<uint32_t, 64> words;
+  };
+
+  CommandBuffer command() { return CommandBuffer(*this); }
+
   // Host memory must be in pinned or GTT memory to qualify for DMA transfers.
   std::expected<void, Error> copy_linear(void *dst, const void *src,
                                          size_t bytes) {
-    const uint32_t max_bytes =
-        sdma::max_copy_linear_bytes(base.dev->gfx_version());
-    auto *d = static_cast<char *>(dst);
-    auto *s = static_cast<const char *>(src);
-    while (bytes) {
-      uint32_t chunk =
-          static_cast<uint32_t>(bytes < max_bytes ? bytes : max_bytes);
-      uint32_t buf[sdma::COPY_LINEAR_DWORDS];
-      sdma::copy_linear(buf, d, s, chunk);
-      KFD_CHECK(base.submit(buf, sdma::COPY_LINEAR_DWORDS));
-      d += chunk;
-      s += chunk;
-      bytes -= chunk;
-    }
-    return {};
+    return command().copy_linear(dst, src, bytes).submit();
   }
 
   std::expected<void, Error> const_fill(void *dst, uint32_t value,
-                                        uint32_t bytes) {
-    uint32_t buf[sdma::CONST_FILL_DWORDS];
-    sdma::const_fill(buf, base.dev->gfx_version(), dst, value, bytes);
-    return base.submit(buf, sdma::CONST_FILL_DWORDS);
+                                        size_t bytes) {
+    return command().const_fill(dst, value, bytes).submit();
   }
 
   std::expected<void, Error> fence(void *addr, uint32_t value) {
-    uint32_t buf[sdma::FENCE_DWORDS];
-    sdma::fence(buf, base.dev->gfx_version(), addr, value);
-    return base.submit(buf, sdma::FENCE_DWORDS);
+    return command().fence(addr, value).submit();
   }
 
   std::expected<void, Error>
   flush_caches(uint32_t gcr_cntl = sdma::GCR_FLUSH_ALL) {
-    if (base.dev->gfx_version() < abi::GFX_VERSION_GFX10_1)
-      return {};
-    uint32_t buf[sdma::GCR_REQ_DWORDS];
-    sdma::gcr_req(buf, gcr_cntl);
-    return base.submit(buf, sdma::GCR_REQ_DWORDS);
+    return command().flush_caches(gcr_cntl).submit();
   }
 
   std::expected<void, Error> poll_regmem(void *addr, Condition cond,
                                          uint32_t reference,
                                          uint32_t mask = 0xFFFFFFFF) {
-    uint32_t buf[sdma::POLL_REGMEM_DWORDS];
-    sdma::poll_regmem(buf, addr, cond, reference, mask);
-    return base.submit(buf, sdma::POLL_REGMEM_DWORDS);
+    return command().poll_regmem(addr, cond, reference, mask).submit();
   }
 
   std::expected<void, Error> timestamp(void *addr) {
-    uint32_t buf[sdma::TIMESTAMP_DWORDS];
-    sdma::timestamp(buf, addr);
-    return base.submit(buf, sdma::TIMESTAMP_DWORDS);
+    return command().timestamp(addr).submit();
   }
 
   std::expected<void, Error> atomic_mem(sdma::AtomicOp op, void *addr,
                                         int64_t src_data,
                                         int64_t cmp_data = 0) {
-    uint32_t buf[sdma::ATOMIC_DWORDS];
-    sdma::atomic_mem(buf, op, addr, src_data, cmp_data);
-    return base.submit(buf, sdma::ATOMIC_DWORDS);
+    return command().atomic_mem(op, addr, src_data, cmp_data).submit();
   }
 
   // Decrements the signal's value and fires an event once the preceding work
   // has finished. Flush the caches to ensure a coherent state at completion.
   std::expected<void, Error> signal(Signal &sig) {
-    uint32_t buf[sdma::GCR_REQ_DWORDS + sdma::ATOMIC_DWORDS +
-                 sdma::FENCE_DWORDS + sdma::TRAP_DWORDS];
-    uint32_t n = 0;
-    if (base.dev->gfx_version() >= abi::GFX_VERSION_GFX10_1)
-      n += sdma::gcr_req(buf + n);
-    n += sdma::atomic_mem(buf + n, sdma::ATOMIC_ADD_64, sig.fence_addr(), -1);
-    n += sdma::fence(buf + n, base.dev->gfx_version(), sig.signal_addr(),
-                     sig.event_id());
-    n += sdma::trap(buf + n, sig.trigger_data());
-    return base.submit(buf, n);
+    return command().signal(sig).submit();
   }
 
   // Stalls the engine until the fence satisfies the condition. SDMA has no
   // 64-bit memory poll, so the compared value is 32-bit by construction.
   std::expected<void, Error> wait(Signal &sig, Condition cond, uint32_t value) {
-    uint32_t buf[sdma::POLL_REGMEM_DWORDS];
-    sdma::poll_regmem(buf, sig.fence_addr(), cond, value);
-    return base.submit(buf, sdma::POLL_REGMEM_DWORDS);
+    return command().wait(sig, cond, value).submit();
   }
 
   uint32_t queue_id() const { return base.queue_id(); }
@@ -745,15 +831,23 @@ private:
   friend class XGMIQueue;
 
   explicit SDMAQueue(QueueBase &&b) : base(std::move(b)) {}
+
+  std::expected<void, Error> submit_words(const uint32_t *data, size_t n,
+                                          uint64_t timeout_ns) {
+    return base.submit(data, n, timeout_ns);
+  }
+
   QueueBase base;
 };
 
 // An SDMA queue used to copy between two XGMI devices instead of PCI(e).
 class XGMIQueue : public SDMAQueue {
 public:
+  // engine_id is the kernel id. XGMI engines follow the PCIe ones.
   static std::expected<XGMIQueue, Error>
   create(Device &dev, size_t ring_size = detail::page_size(),
-         uint32_t priority = QueueBase::DEFAULT_PRIORITY);
+         uint32_t priority = QueueBase::DEFAULT_PRIORITY,
+         std::optional<uint32_t> engine_id = std::nullopt);
 
 private:
   explicit XGMIQueue(QueueBase &&b) : SDMAQueue(std::move(b)) {}
