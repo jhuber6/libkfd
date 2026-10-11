@@ -647,6 +647,15 @@ public:
   uint32_t queue_id() const { return base.queue_id(); }
   explicit operator bool() const { return static_cast<bool>(base); }
 
+  // The command processor's queue descriptor. Its prefix is hsa_queue_t.
+  void *descriptor() const { return base.amd_queue(); }
+
+  // Mapped MMIO register. A store of a packet index makes the CP look.
+  volatile uint64_t *hardware_doorbell() const { return base.doorbell; }
+
+  // Mark the queue exclusively scheduled. GFX12 carries this in the packet.
+  std::expected<void, Error> acquire_gws();
+
 private:
   explicit AQLQueue(QueueBase &&b) : base(std::move(b)) {}
 

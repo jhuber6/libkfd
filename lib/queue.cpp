@@ -985,6 +985,24 @@ std::expected<void, Error> QueueBase::set_priority(uint32_t priority) {
   return {};
 }
 
+std::expected<void, Error> AQLQueue::acquire_gws() {
+  Device &dev = *base.dev;
+  if (dev.gfx_version() >= abi::GFX_VERSION_GFX12)
+    return {};
+  if (dev.properties().num_gws == 0)
+    return kfd::unexpected(EOPNOTSUPP,
+                           "device does not support cooperative launch");
+
+  ioctl::kfd::alloc_queue_gws_args gws{};
+  gws.queue_id = queue_id();
+  gws.num_gws = 1;
+  auto r =
+      ioctl::call<ioctl::kfd::ALLOC_QUEUE_GWS>(dev.context().kfd_fd(), gws);
+  if (!r)
+    return kfd::unexpected(r.error());
+  return {};
+}
+
 std::expected<CooperativeQueue, Error>
 CooperativeQueue::create(Device &dev, size_t ring_size, uint32_t priority,
                          uint32_t target_xcc) {
