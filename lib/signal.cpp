@@ -7,18 +7,71 @@
 //===----------------------------------------------------------------------===//
 
 #include "libkfd/signal.h"
-#include "amd_queue.h"
+#include "ioctl.h"
 #include "libkfd/context.h"
 #include "libkfd/detail/small_vector.h"
 #include "libkfd/detail/utility.h"
 
+#include <cerrno>
+#include <cstddef>
 #include <ctime>
+#include <new>
 #include <utility>
 
 namespace kfd {
 
-uint64_t Signal::completion_handle() const {
-  return kfd::completion_handle(fence);
+Signal::Slot::Slot(Event &&incoming, uint64_t initial)
+    : ev(std::move(incoming)) {
+  __atomic_store_n(&fence, initial, __ATOMIC_RELAXED);
+  __atomic_store_n(&event_mailbox,
+                   reinterpret_cast<uintptr_t>(ev.signal_addr()),
+                   __ATOMIC_RELAXED);
+  __atomic_store_n(&event_id_word, ev.event_id(), __ATOMIC_RELAXED);
+  __atomic_store_n(&kind, int64_t{1}, __ATOMIC_RELEASE);
+}
+
+bool Signal::retire(Slot *resident) {
+  if (resident == nullptr)
+    return false;
+  int64_t live = 1;
+  if (!__atomic_compare_exchange_n(&resident->kind, &live, int64_t{0},
+                                   /*weak=*/false, __ATOMIC_RELEASE,
+                                   __ATOMIC_RELAXED))
+    return false;
+  // The slot lifetime ends before DESTROY_EVENT. The kernel can recycle the
+  // index as soon as that ioctl returns.
+  __atomic_store_n(&resident->owner, static_cast<Signal *>(nullptr),
+                   __ATOMIC_RELEASE);
+  Event ev = std::move(resident->ev);
+  resident->~Slot();
+  return true;
+}
+
+Signal::~Signal() { retire(std::exchange(slot, nullptr)); }
+
+Signal::Signal(Signal &&other) noexcept
+    : slot(std::exchange(other.slot, nullptr)) {
+  if (slot)
+    __atomic_store_n(&slot->owner, this, __ATOMIC_RELEASE);
+}
+
+Signal &Signal::operator=(Signal &&other) noexcept {
+  if (this != &other) {
+    retire(std::exchange(slot, nullptr));
+    slot = std::exchange(other.slot, nullptr);
+    if (slot)
+      __atomic_store_n(&slot->owner, this, __ATOMIC_RELEASE);
+  }
+  return *this;
+}
+
+Signal *Signal::from_handle(uint64_t handle) {
+  if (handle == 0)
+    return nullptr;
+  auto *resident = reinterpret_cast<Slot *>(handle);
+  if (__atomic_load_n(&resident->kind, __ATOMIC_ACQUIRE) != 1)
+    return nullptr;
+  return __atomic_load_n(&resident->owner, __ATOMIC_ACQUIRE);
 }
 
 namespace {
@@ -87,26 +140,23 @@ uint64_t add_sat(uint64_t a, uint64_t b) {
 
 std::expected<Signal, Error> Signal::create(Context &ctx, uint64_t initial) {
   auto ev = KFD_TRY(Event::create(ctx));
-  auto slot = KFD_TRY(ctx.fence_slot(ev));
-
-  Signal sig(std::move(ev), slot, initial);
-  return sig;
+  auto *base = static_cast<std::byte *>(storage());
+  if (base == nullptr)
+    return kfd::unexpected(EINVAL, "fence page is not mapped");
+  uint32_t index = ev.slot_index();
+  if (index >= KFD_SIGNAL_EVENT_LIMIT)
+    return kfd::unexpected(EINVAL, "signal id %u >= limit %u", index,
+                           static_cast<unsigned>(KFD_SIGNAL_EVENT_LIMIT));
+  auto *mem = reinterpret_cast<Slot *>(base + index * sizeof(Slot));
+  if (__atomic_load_n(&mem->kind, __ATOMIC_ACQUIRE) != 0)
+    return kfd::unexpected(EINVAL, "signal slot %u is still live", index);
+  new (mem) Slot(std::move(ev), initial);
+  return Signal(mem);
 }
 
 std::expected<void, Error> Signal::reset(uint64_t value) {
-  __atomic_store_n(fence, value, __ATOMIC_RELEASE);
+  __atomic_store_n(fence_addr(), value, __ATOMIC_RELEASE);
   return {};
-}
-
-Signal::Signal(Signal &&other)
-    : ev(std::move(other.ev)), fence(std::exchange(other.fence, nullptr)) {}
-
-Signal &Signal::operator=(Signal &&other) {
-  if (this != &other) {
-    ev = std::move(other.ev);
-    fence = std::exchange(other.fence, nullptr);
-  }
-  return *this;
 }
 
 std::expected<void, Error> Signal::wait(Condition cond, uint64_t value,

@@ -92,11 +92,8 @@ public:
 private:
   friend class QueueBase;
   friend class Event;
-  friend class Signal;
 
   std::expected<uint64_t *, Error> event_slot(uint32_t id);
-  // Returns the fence word of the signal slot owned by 'event'.
-  std::expected<uint64_t *, Error> fence_slot(const Event &event);
 
   void notify_fault(const FaultInfo &fault);
 

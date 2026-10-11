@@ -67,7 +67,7 @@ std::expected<SignalPage, Error> alloc_signal_page(SmallVector<Device, 4> &devs,
 
 // Backing memory for the signal system, intentionally leaked once per-process.
 uint64_t *event_page = nullptr;
-CompletionSignal *fence_page = nullptr;
+void *fence_page = nullptr;
 Mutex signal_page_mtx{};
 
 // KFD runtime exception delivery, enabled once per-process.
@@ -519,7 +519,7 @@ std::expected<Context, Error> Context::create() {
       constexpr size_t EVENT_PAGE_SIZE =
           KFD_SIGNAL_EVENT_LIMIT * sizeof(uint64_t);
       constexpr size_t FENCE_PAGE_SIZE =
-          KFD_SIGNAL_EVENT_LIMIT * sizeof(CompletionSignal);
+          KFD_SIGNAL_EVENT_LIMIT * Signal::resident_bytes();
 
       auto ep = KFD_TRY(alloc_signal_page(ctx.gpu_devices, EVENT_PAGE_SIZE));
 
@@ -544,8 +544,7 @@ std::expected<Context, Error> Context::create() {
       }
 
       // Indices to these are handled by the KFD event interface.
-      __atomic_store_n(&fence_page, static_cast<CompletionSignal *>(fp->addr),
-                       __ATOMIC_RELEASE);
+      __atomic_store_n(&fence_page, fp->addr, __ATOMIC_RELEASE);
       __atomic_store_n(&event_page, static_cast<uint64_t *>(ep.addr),
                        __ATOMIC_RELEASE);
     }
@@ -633,14 +632,8 @@ std::expected<uint64_t *, Error> Context::event_slot(uint32_t id) {
   return &__atomic_load_n(&event_page, __ATOMIC_ACQUIRE)[id];
 }
 
-std::expected<uint64_t *, Error> Context::fence_slot(const Event &event) {
-  uint32_t id = event.slot_index();
-  if (id >= KFD_SIGNAL_EVENT_LIMIT)
-    return kfd::unexpected(EINVAL, "fence id %u >= limit %u", id,
-                           static_cast<unsigned>(KFD_SIGNAL_EVENT_LIMIT));
-  CompletionSignal &slot = __atomic_load_n(&fence_page, __ATOMIC_ACQUIRE)[id];
-  slot.bind(event);
-  return &slot.value;
+void *Signal::storage() {
+  return __atomic_load_n(&fence_page, __ATOMIC_ACQUIRE);
 }
 
 std::expected<void, Error>

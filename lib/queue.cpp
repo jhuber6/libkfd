@@ -384,8 +384,11 @@ QueueBase::create(Device &dev, QueueType type, size_t ring_size,
   // whose dispatch IDs replace the ring pointers, and its inactive signal.
   static_assert(AMD_QUEUE_OFFSET % alignof(AmdQueue) == 0);
   constexpr size_t INACTIVE_OFFSET = AMD_QUEUE_OFFSET + sizeof(AmdQueue);
-  size_t ctl_size = is_aql ? INACTIVE_OFFSET + sizeof(CompletionSignal)
-                           : sizeof(QueueControl);
+  // The CP reads this 64-byte record directly.
+  constexpr size_t kInactiveBytes = 64;
+  static_assert(INACTIVE_OFFSET % kInactiveBytes == 0);
+  size_t ctl_size =
+      is_aql ? INACTIVE_OFFSET + kInactiveBytes : sizeof(QueueControl);
   auto ctl_buf =
       KFD_TRY(Buffer::allocate(dev, ctl_size, MemType::GTT, QUEUE_GTT_FLAGS));
   KFD_CHECK(ctl_buf.map(dev));
@@ -483,7 +486,7 @@ QueueBase::create(Device &dev, QueueType type, size_t ring_size,
   // A zeroed AQL slot decodes as a vendor-specific packet, so every header
   // starts out INVALID. The CP restores INVALID after consuming a packet.
   AmdQueue *amdq = nullptr;
-  CompletionSignal *inactive = nullptr;
+  void *inactive = nullptr;
   detail::Box<Event> inactive_ev;
   if (is_aql) {
     auto *slots = static_cast<abi::DispatchPacket *>(ring_buf.data());
@@ -494,10 +497,16 @@ QueueBase::create(Device &dev, QueueType type, size_t ring_size,
     auto raw_ev = KFD_TRY(Event::create(ctx));
     inactive_ev = KFD_TRY(detail::Box<Event>::create(std::move(raw_ev)));
     auto *ctl_bytes = static_cast<std::byte *>(ctl_buf.data());
-    inactive = new (ctl_bytes + INACTIVE_OFFSET) CompletionSignal();
-    inactive->bind(*inactive_ev);
+    inactive = ctl_bytes + INACTIVE_OFFSET;
+    __atomic_store_n(
+        reinterpret_cast<uint64_t *>(static_cast<std::byte *>(inactive) + 16),
+        reinterpret_cast<uintptr_t>(inactive_ev->signal_addr()),
+        __ATOMIC_RELAXED);
+    __atomic_store_n(
+        reinterpret_cast<uint32_t *>(static_cast<std::byte *>(inactive) + 24),
+        inactive_ev->event_id(), __ATOMIC_RELAXED);
     amdq = new (ctl_bytes + AMD_QUEUE_OFFSET)
-        AmdQueue(ring_buf.data(), packets, *inactive);
+        AmdQueue(ring_buf.data(), packets, inactive);
   }
 
   uint64_t *write_ptr = is_aql ? &amdq->write_dispatch_id : &ctl->write_ptr;
@@ -587,7 +596,8 @@ QueueBase::create(Device &dev, QueueType type, size_t ring_size,
     auto *sctx = q.scratch_watch_ctx.get();
     sctx->dev = &dev;
     sctx->amd_queue = amdq;
-    sctx->inactive = &inactive->value;
+    sctx->inactive =
+        reinterpret_cast<uint64_t *>(static_cast<std::byte *>(inactive) + 8);
     sctx->ring = static_cast<const abi::DispatchPacket *>(q.ring.data());
     sctx->ring_packets = ring_size / AQLQueue::PACKET_SIZE;
     sctx->err = q.err_watch_ctx.get();
