@@ -11,6 +11,7 @@
 
 #include "libkfd/condition.h"
 #include "libkfd/context.h"
+#include "libkfd/cpu.h"
 #include "libkfd/device.h"
 #include "libkfd/dispatch.h"
 #include "libkfd/error.h"

@@ -60,16 +60,19 @@ TEST_CASE("Context - move construction preserves state", "[context]") {
 
   int original_fd = result->kfd_fd();
   size_t original_ndevs = result->num_devices();
+  size_t original_ncpus = result->cpus().size();
 
   kfd::Context moved(std::move(*result));
   CHECK(moved.kfd_fd() == original_fd);
   CHECK(moved.num_devices() == original_ndevs);
+  CHECK(moved.cpus().size() == original_ncpus);
 
   for (size_t i = 0; i < moved.num_devices(); ++i) {
     DYNAMIC_SECTION("device " << i) {
       auto dev = moved.device(i);
       REQUIRE_RESULT(dev);
       CHECK(&(*dev)->context() == &moved);
+      CHECK((*dev)->gpu_id() != 0);
     }
   }
 }
@@ -85,16 +88,19 @@ TEST_CASE("Context - move assignment preserves state", "[context]") {
 
   int second_fd = second->kfd_fd();
   size_t second_ndevs = second->num_devices();
+  size_t second_ncpus = second->cpus().size();
 
   *first = std::move(*second);
   CHECK(first->kfd_fd() == second_fd);
   CHECK(first->num_devices() == second_ndevs);
+  CHECK(first->cpus().size() == second_ncpus);
 
   for (size_t i = 0; i < first->num_devices(); ++i) {
     DYNAMIC_SECTION("device " << i) {
       auto dev = first->device(i);
       REQUIRE_RESULT(dev);
       CHECK(&(*dev)->context() == &*first);
+      CHECK((*dev)->gpu_id() != 0);
     }
   }
 }
@@ -128,6 +134,22 @@ TEST_CASE("Context - multiple contexts coexist", "[context]") {
   REQUIRE_RESULT(ver_b);
   CHECK(ver_a->major == ver_b->major);
   CHECK(ver_a->minor == ver_b->minor);
+}
+
+TEST_CASE("Context - cpus report cores", "[context]") {
+  auto ctx = kfd::Context::create();
+  if (!ctx)
+    SKIP("KFD not available: " << kfd::strerror(ctx.error()));
+
+  REQUIRE(ctx->cpus().size() >= 1);
+  for (const kfd::Cpu &cpu : ctx->cpus())
+    CHECK(cpu.properties().cpu_cores_count > 0);
+
+  for (size_t i = 0; i < ctx->num_devices(); ++i) {
+    auto dev = ctx->device(i);
+    REQUIRE_RESULT(dev);
+    CHECK((*dev)->gpu_id() != 0);
+  }
 }
 
 TEST_CASE("Context - node properties have reasonable values", "[context]") {

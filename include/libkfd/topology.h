@@ -34,6 +34,8 @@ struct NodeProperties {
   uint32_t drm_render_minor;
   // Number of CPU cores on this node.
   uint32_t cpu_cores_count;
+  // Lowest APIC id of a logical processor on this node.
+  uint32_t cpu_core_id_base;
   // Total SIMD units across all CUs.
   uint32_t simd_count;
   // Total shader arrays (SE * SA).
@@ -208,6 +210,7 @@ public:
   Topology(Topology &&) = default;
   Topology &operator=(Topology &&) = default;
 
+  // Every node, in topology order.
   std::span<const NodeInfo> nodes() const {
     return {storage.data(), storage.size()};
   }

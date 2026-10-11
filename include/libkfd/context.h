@@ -9,6 +9,7 @@
 #define LIBKFD_CONTEXT_H
 
 #include "libkfd/condition.h"
+#include "libkfd/cpu.h"
 #include "libkfd/detail/box.h"
 #include "libkfd/detail/small_vector.h"
 #include "libkfd/device.h"
@@ -54,8 +55,8 @@ struct VersionInfo {
 inline constexpr uint32_t MIN_KFD_MAJOR = 1;
 inline constexpr uint32_t MIN_KFD_MINOR = 4;
 
-// Owns an open file descriptor to '/dev/kfd' and a Device for every GPU node
-// visible in the topology.
+// Owns an open file descriptor to '/dev/kfd'. A node with a GPU id becomes a
+// Device. A node with only CPU cores becomes a Cpu.
 class Context {
 public:
   static std::expected<Context, Error> create();
@@ -72,9 +73,14 @@ public:
   int kfd_fd() const { return fd; }
   // Whether GPU page fault retry (SVM) mode is active.
   bool xnack_enabled() const { return xnack; }
-  size_t num_devices() const { return nodes.size(); }
 
-  std::span<Device> devices() { return nodes; }
+  size_t num_cpus() const { return cpu_nodes.size(); }
+  std::span<const Cpu> cpus() const {
+    return {cpu_nodes.data(), cpu_nodes.size()};
+  }
+
+  size_t num_devices() const { return gpu_devices.size(); }
+  std::span<Device> devices() { return gpu_devices; }
   std::expected<Device *, Error> device(size_t i);
 
   // Register a handler with the context's watcher threads.
@@ -101,7 +107,8 @@ private:
   explicit Context(int fd, bool xnack, detail::SmallVector<Device, 4> devices);
   int fd;
   bool xnack = false;
-  detail::SmallVector<Device, 4> nodes;
+  detail::SmallVector<Cpu, 4> cpu_nodes;
+  detail::SmallVector<Device, 4> gpu_devices;
   detail::Box<SignalWatcher> signal_watcher;
   detail::Box<ExceptionWatcher> exception_watcher;
 };

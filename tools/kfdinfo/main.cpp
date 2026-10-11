@@ -182,6 +182,15 @@ bool query_marketing_name(uint32_t render_minor, char *buf, size_t len) {
   return found;
 }
 
+void print_cpu(const kfd::NodeInfo &node, uint32_t index) {
+  const auto &p = node.props;
+  std::printf("\n%s%s=== CPU %u ===%s\n", b(), c(), index, r());
+
+  print_section("Identity");
+  print_field("CPU Cores:", "%u", p.cpu_cores_count);
+  print_field("Core ID Base:", "%u", p.cpu_core_id_base);
+}
+
 void print_node(const kfd::NodeInfo &node, uint32_t index) {
   const auto &p = node.props;
   using namespace kfd::detail;
@@ -225,6 +234,8 @@ void print_node(const kfd::NodeInfo &node, uint32_t index) {
   print_field("PCI Location:", "%s%04x:%02x:%02x.%x%s", g(), p.domain, bus, dev,
               func, r());
   print_field("KFD GPU ID:", "%u", p.gpu_id);
+  if (p.cpu_cores_count != 0)
+    print_field("CPU Cores:", "%u", p.cpu_cores_count);
   print_field("Render Node:", "/dev/dri/renderD%u", p.drm_render_minor);
   if (p.unique_id)
     print_field("Unique ID:", "0x%016lx",
@@ -408,14 +419,29 @@ int main(int argc, char **argv) {
   auto topo = KFD_EXPECT(kfd::Topology::create());
 
   auto nodes = topo.nodes();
+  size_t gpu_count = 0;
+  size_t cpu_count = 0;
+  for (const kfd::NodeInfo &node : nodes) {
+    if (node.props.gpu_id == 0)
+      ++cpu_count;
+    else
+      ++gpu_count;
+  }
+
   std::printf("%s%skfdinfo%s - KFD Topology Inspector\n", b(), c(), r());
   print_separator();
   std::printf("  Topology generation:   %u\n", topo.generation());
-  std::printf("  GPU nodes discovered:  %s%zu%s\n", g(), nodes.size(), r());
+  std::printf("  GPU nodes discovered:  %s%zu%s\n", g(), gpu_count, r());
+  std::printf("  CPU nodes discovered:  %s%zu%s\n", g(), cpu_count, r());
 
+  uint32_t gpu_index = 0;
+  uint32_t cpu_index = 0;
   for (size_t i = 0; i < nodes.size(); ++i) {
     print_separator();
-    print_node(nodes[i], static_cast<uint32_t>(i));
+    if (nodes[i].props.gpu_id == 0)
+      print_cpu(nodes[i], cpu_index++);
+    else
+      print_node(nodes[i], gpu_index++);
   }
 
   print_separator();

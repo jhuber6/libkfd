@@ -92,6 +92,8 @@ void parse_property(NodeProperties &props, std::string_view key, uint64_t val) {
     props.drm_render_minor = u32;
   else if (key == "cpu_cores_count")
     props.cpu_cores_count = u32;
+  else if (key == "cpu_core_id_base")
+    props.cpu_core_id_base = u32;
   else if (key == "simd_count")
     props.simd_count = u32;
   else if (key == "array_count")
@@ -360,16 +362,9 @@ uint32_t count_nodes() {
 // Read a single node's properties and subtrees.
 std::expected<NodeInfo, Error> read_node(uint32_t index) {
   auto props = KFD_TRY(read_properties(index));
-
-  if (props.gpu_id == 0)
-    return NodeInfo{props, {}, {}, {}};
-
   auto banks = KFD_TRY(read_memory_banks(index, props.mem_banks_count));
-
   auto caches = KFD_TRY(read_caches(index, props.caches_count));
-
   auto links = KFD_TRY(read_io_links(index, props.io_links_count));
-
   return NodeInfo{props, std::move(banks), std::move(caches), std::move(links)};
 }
 
@@ -441,11 +436,10 @@ std::expected<Topology, Error> Topology::create() {
 
     for (uint32_t i = 0; i < num_nodes; ++i) {
       auto node = KFD_TRY(read_node(i));
-      if (node.props.gpu_id == 0)
-        continue;
 
       // Linux 6.19+ added this as a property, calculate it otherwise.
-      if (!node.props.cwsr_size || !node.props.ctl_stack_size) {
+      if (node.props.gpu_id != 0 &&
+          (!node.props.cwsr_size || !node.props.ctl_stack_size)) {
         auto [cwsr_size, ctl_stack_size] = compute_cwsr_sizes(node.props);
         node.props.cwsr_size = cwsr_size;
         node.props.ctl_stack_size = ctl_stack_size;

@@ -52,6 +52,12 @@ public:
   const T *get() const { return ptr; }
   explicit operator bool() const { return ptr != nullptr; }
 
+  // Drop ownership of the pointer. adopt() takes it back.
+  T *release() { return std::exchange(ptr, nullptr); }
+
+  // Own a pointer previously returned by release().
+  static Box adopt(T *p) { return Box(p); }
+
 private:
   explicit Box(T *p) : ptr(p) {}
 

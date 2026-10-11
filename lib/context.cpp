@@ -465,7 +465,7 @@ void free_signal_page(int kfd_fd, SmallVector<Device, 4> &devs,
 constexpr const char KFD_PATH[] = "/dev/kfd";
 
 Context::Context(int fd, bool xnack, SmallVector<Device, 4> devices)
-    : fd(fd), xnack(xnack), nodes(std::move(devices)) {}
+    : fd(fd), xnack(xnack), gpu_devices(std::move(devices)) {}
 
 std::expected<Context, Error> Context::create() {
   int fd = ::open(KFD_PATH, O_RDWR | O_CLOEXEC);
@@ -503,8 +503,13 @@ std::expected<Context, Error> Context::create() {
 
   Context ctx(fd, xnack_mode, {});
   for (auto &node : topo->nodes()) {
-    auto dev = KFD_TRY(Device::create(ctx, std::move(node)));
-    KFD_CHECK(ctx.nodes.push_back(std::move(dev)));
+    if (node.props.gpu_id != 0) {
+      auto dev = KFD_TRY(Device::create(ctx, std::move(node)));
+      KFD_CHECK(ctx.gpu_devices.push_back(std::move(dev)));
+      continue;
+    }
+    if (node.props.cpu_cores_count != 0)
+      KFD_CHECK(ctx.cpu_nodes.push_back(Cpu(std::move(node))));
   }
 
   // The event page is sticky once initialized so we do this once per process.
@@ -516,7 +521,7 @@ std::expected<Context, Error> Context::create() {
       constexpr size_t FENCE_PAGE_SIZE =
           KFD_SIGNAL_EVENT_LIMIT * sizeof(CompletionSignal);
 
-      auto ep = KFD_TRY(alloc_signal_page(ctx.nodes, EVENT_PAGE_SIZE));
+      auto ep = KFD_TRY(alloc_signal_page(ctx.gpu_devices, EVENT_PAGE_SIZE));
 
       // Register the event page with the kernel via a throwaway event.
       ioctl::kfd::create_event_args eargs{
@@ -526,15 +531,15 @@ std::expected<Context, Error> Context::create() {
       };
       if (auto r = ioctl::call<ioctl::kfd::CREATE_EVENT>(ctx.kfd_fd(), eargs);
           !r) {
-        free_signal_page(ctx.kfd_fd(), ctx.nodes, ep);
+        free_signal_page(ctx.kfd_fd(), ctx.gpu_devices, ep);
         return kfd::unexpected(r.error());
       }
       ioctl::kfd::destroy_event_args dargs{.event_id = eargs.event_id};
       KFD_ASSERT(ioctl::call<ioctl::kfd::DESTROY_EVENT>(ctx.kfd_fd(), dargs));
 
-      auto fp = alloc_signal_page(ctx.nodes, FENCE_PAGE_SIZE);
+      auto fp = alloc_signal_page(ctx.gpu_devices, FENCE_PAGE_SIZE);
       if (!fp) {
-        free_signal_page(ctx.kfd_fd(), ctx.nodes, ep);
+        free_signal_page(ctx.kfd_fd(), ctx.gpu_devices, ep);
         return kfd::unexpected(fp.error());
       }
 
@@ -569,27 +574,28 @@ std::expected<Context, Error> Context::create() {
 }
 
 std::expected<Device *, Error> Context::device(size_t i) {
-  if (i >= nodes.size())
+  if (i >= gpu_devices.size())
     return kfd::unexpected(EINVAL, "device index %zu >= device count %zu", i,
-                           nodes.size());
+                           gpu_devices.size());
 
-  return &nodes[i];
+  return &gpu_devices[i];
 }
 
 Context::~Context() {
   signal_watcher = {};
   exception_watcher = {};
-  nodes.clear();
+  gpu_devices.clear();
   if (fd >= 0)
     ::close(fd);
 }
 
 Context::Context(Context &&other)
     : fd(std::exchange(other.fd, -1)), xnack(other.xnack),
-      nodes(std::move(other.nodes)),
+      cpu_nodes(std::move(other.cpu_nodes)),
+      gpu_devices(std::move(other.gpu_devices)),
       signal_watcher(std::move(other.signal_watcher)),
       exception_watcher(std::move(other.exception_watcher)) {
-  for (auto &dev : nodes)
+  for (auto &dev : gpu_devices)
     dev.ctx = this;
 }
 
@@ -597,17 +603,18 @@ Context &Context::operator=(Context &&other) {
   if (this != &other) {
     signal_watcher = {};
     exception_watcher = {};
-    nodes.clear();
+    gpu_devices.clear();
     if (fd >= 0)
       ::close(fd);
 
     fd = std::exchange(other.fd, -1);
     xnack = other.xnack;
-    nodes = std::move(other.nodes);
+    cpu_nodes = std::move(other.cpu_nodes);
+    gpu_devices = std::move(other.gpu_devices);
     signal_watcher = std::move(other.signal_watcher);
     exception_watcher = std::move(other.exception_watcher);
 
-    for (auto &dev : nodes)
+    for (auto &dev : gpu_devices)
       dev.ctx = this;
   }
   return *this;
