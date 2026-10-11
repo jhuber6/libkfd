@@ -272,3 +272,22 @@ TEST_CASE("Memory - DMA-BUF import", "[memory][dmabuf]") {
     CHECK(static_cast<uint32_t *>(scratch->data())[0] == 0xA5A5A5A5);
   }
 }
+
+TEST_CASE("Memory - contiguous VRAM allocation", "[memory]") {
+  auto *ctx = get_ctx();
+  if (!ctx)
+    SKIP("KFD not available");
+
+  for (size_t i = 0; i < ctx->num_devices(); ++i) {
+    auto dev = ctx->device(i);
+    REQUIRE_RESULT(dev);
+    CAPTURE(i, (*dev)->gpu_id());
+
+    auto buf = kfd::Buffer::allocate(**dev, 4096, kfd::MemType::VRAM,
+                                     kfd::MemFlags::WRITABLE |
+                                         kfd::MemFlags::CONTIGUOUS |
+                                         kfd::MemFlags::NO_SUBSTITUTE);
+    REQUIRE_RESULT(buf);
+    REQUIRE_RESULT(buf->map(**dev));
+  }
+}

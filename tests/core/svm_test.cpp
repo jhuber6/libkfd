@@ -209,3 +209,61 @@ TEST_CASE("SVM - bidirectional CPU and GPU atomics", "[svm]") {
     CHECK(*counter == CPU_ADD + GPU_ADD);
   }
 }
+
+TEST_CASE("SVM - attributes round-trip", "[svm]") {
+  auto *ctx = get_ctx();
+  if (!ctx)
+    SKIP("KFD not available");
+
+  for (size_t i = 0; i < ctx->num_devices(); ++i) {
+    auto dev = ctx->device(i);
+    REQUIRE_RESULT(dev);
+
+    if (!svm_supported(**dev))
+      SKIP("SVM not supported on device " << i);
+    CAPTURE(i, (*dev)->gpu_id());
+
+    auto region = kfd::detail::MappedRegion::create(kfd::detail::page_size());
+    REQUIRE_RESULT(region);
+
+    kfd::Device *dev_ptr = *dev;
+    constexpr auto flags = kfd::SVMFlags::HOST_ACCESS | kfd::SVMFlags::GPU_EXEC;
+    REQUIRE_RESULT(
+        kfd::svm_set_preferred_loc(*ctx, region->data(), region->size()));
+    REQUIRE_RESULT(
+        kfd::svm_set_flags(*ctx, region->data(), region->size(), flags));
+    REQUIRE_RESULT(kfd::svm_set_access(*ctx, region->data(), region->size(),
+                                       {&dev_ptr, 1}));
+    REQUIRE_RESULT(
+        kfd::svm_set_granularity(*ctx, region->data(), region->size(), 4));
+    REQUIRE_RESULT(
+        kfd::svm_prefetch(*ctx, region->data(), region->size(), *dev));
+
+    auto attrs = kfd::svm_get_attrs(*ctx, region->data(), region->size());
+    REQUIRE_RESULT(attrs);
+    CHECK(attrs->flags == flags);
+    CHECK(attrs->mixed == kfd::SVMFlags::NONE);
+    CHECK(attrs->granularity == 4);
+    CHECK(attrs->preferred.device == nullptr);
+    CHECK_FALSE(attrs->preferred.mixed);
+    CHECK(attrs->prefetch.device == *dev);
+    CHECK_FALSE(attrs->prefetch.mixed);
+
+    auto access =
+        kfd::svm_get_access(*ctx, region->data(), region->size(), **dev);
+    REQUIRE_RESULT(access);
+    CHECK(*access == kfd::SVMAccess::Migrate);
+
+    REQUIRE_RESULT(kfd::svm_set_access(*ctx, region->data(), region->size(),
+                                       {&dev_ptr, 1}, kfd::SVMAccess::InPlace));
+    access = kfd::svm_get_access(*ctx, region->data(), region->size(), **dev);
+    REQUIRE_RESULT(access);
+    CHECK(*access == kfd::SVMAccess::InPlace);
+
+    REQUIRE_RESULT(kfd::svm_set_access(*ctx, region->data(), region->size(),
+                                       {&dev_ptr, 1}, kfd::SVMAccess::None));
+    access = kfd::svm_get_access(*ctx, region->data(), region->size(), **dev);
+    REQUIRE_RESULT(access);
+    CHECK(*access == kfd::SVMAccess::None);
+  }
+}

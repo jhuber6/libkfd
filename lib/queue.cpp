@@ -553,9 +553,10 @@ QueueBase::create(Device &dev, QueueType type, size_t ring_size,
     return kfd::unexpected(db_slot.error());
   }
 
-  QueueBase q(type, ctx, dev, args.queue_id, std::move(ctl_buf),
-              std::move(ring_buf), std::move(eop_buf), std::move(cwsr_buf),
-              std::move(cwsr_bo_buf), *db_slot, std::move(err_ev), {});
+  QueueBase q(type, ctx, dev, args.queue_id, priority, target_xcc,
+              std::move(ctl_buf), std::move(ring_buf), std::move(eop_buf),
+              std::move(cwsr_buf), std::move(cwsr_bo_buf), *db_slot,
+              std::move(err_ev), {});
 
   if (is_compute) {
     uint32_t cu_count =
@@ -615,11 +616,12 @@ QueueBase::create(Device &dev, QueueType type, size_t ring_size,
 }
 
 QueueBase::QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
-                     Buffer control, Buffer ring, Buffer eop,
-                     detail::MappedRegion cwsr, Buffer cwsr_bo,
-                     volatile uint64_t *doorbell, detail::Box<Event> err_event,
-                     detail::Mutex submit_mtx)
-    : type(type), ctx(&ctx), dev(&dev), id(id), control(std::move(control)),
+                     uint32_t priority, uint32_t target_xcc, Buffer control,
+                     Buffer ring, Buffer eop, detail::MappedRegion cwsr,
+                     Buffer cwsr_bo, volatile uint64_t *doorbell,
+                     detail::Box<Event> err_event, detail::Mutex submit_mtx)
+    : type(type), ctx(&ctx), dev(&dev), id(id), queue_priority(priority),
+      target_xcc(target_xcc), control(std::move(control)),
       ring(std::move(ring)), eop(std::move(eop)), cwsr(std::move(cwsr)),
       cwsr_bo(std::move(cwsr_bo)), doorbell(doorbell),
       err_event(std::move(err_event)), submit_mtx(std::move(submit_mtx)) {}
@@ -652,6 +654,7 @@ QueueBase::~QueueBase() {
 QueueBase::QueueBase(QueueBase &&other)
     : type(other.type), ctx(std::exchange(other.ctx, nullptr)),
       dev(std::exchange(other.dev, nullptr)), id(std::exchange(other.id, 0)),
+      queue_priority(other.queue_priority), target_xcc(other.target_xcc),
       control(std::move(other.control)), ring(std::move(other.ring)),
       eop(std::move(other.eop)), cwsr(std::move(other.cwsr)),
       cwsr_bo(std::move(other.cwsr_bo)),
@@ -690,6 +693,8 @@ QueueBase &QueueBase::operator=(QueueBase &&other) {
   ctx = std::exchange(other.ctx, nullptr);
   dev = std::exchange(other.dev, nullptr);
   id = std::exchange(other.id, 0);
+  queue_priority = other.queue_priority;
+  target_xcc = other.target_xcc;
   ring = std::move(other.ring);
   control = std::move(other.control);
   eop = std::move(other.eop);
@@ -950,6 +955,23 @@ QueueBase::set_cu_mask(std::span<const uint32_t> mask) {
 
   KFD_CHECK(cu_mask_words.resize(words));
   std::memcpy(cu_mask_words.data(), mask.data(), words * sizeof(uint32_t));
+  return {};
+}
+
+std::expected<void, Error> QueueBase::set_priority(uint32_t priority) {
+  if (priority > 15)
+    return kfd::unexpected(
+        EINVAL, "invalid queue priority; %u exceeds max of 15", priority);
+
+  ioctl::kfd::update_queue_args args{
+      .ring_base_address = reinterpret_cast<uintptr_t>(ring.data()),
+      .queue_id = id,
+      .ring_size = static_cast<uint32_t>(ring.size()),
+      .queue_percentage = (target_xcc << 8) | 100,
+      .queue_priority = priority,
+  };
+  KFD_CHECK(ioctl::call<ioctl::kfd::UPDATE_QUEUE>(ctx->kfd_fd(), args));
+  queue_priority = priority;
   return {};
 }
 

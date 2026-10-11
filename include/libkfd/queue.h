@@ -127,9 +127,10 @@ private:
 
   QueueBase() = default;
   QueueBase(QueueType type, Context &ctx, Device &dev, uint32_t id,
-            Buffer control, Buffer ring, Buffer eop, detail::MappedRegion cwsr,
-            Buffer cwsr_bo, volatile uint64_t *doorbell,
-            detail::Box<Event> err_event, detail::Mutex submit_mtx);
+            uint32_t priority, uint32_t target_xcc, Buffer control, Buffer ring,
+            Buffer eop, detail::MappedRegion cwsr, Buffer cwsr_bo,
+            volatile uint64_t *doorbell, detail::Box<Event> err_event,
+            detail::Mutex submit_mtx);
 
   std::expected<void, Error>
   submit(const uint32_t *data, size_t dwords,
@@ -150,6 +151,10 @@ private:
   std::span<const uint32_t> cu_mask() const {
     return {cu_mask_words.data(), cu_mask_words.size()};
   }
+  // A null ring address disables the queue, so the address from create is
+  // sent back with the new priority.
+  std::expected<void, Error> set_priority(uint32_t priority);
+  uint32_t priority() const { return queue_priority; }
   std::expected<void, Error>
   wait_for_room(uint32_t dwords,
                 uint64_t timeout_ns = DEFAULT_SUBMIT_TIMEOUT_NS);
@@ -163,6 +168,8 @@ private:
   Context *ctx = nullptr;
   Device *dev = nullptr;
   uint32_t id = 0;
+  uint32_t queue_priority = DEFAULT_PRIORITY;
+  uint32_t target_xcc = 0;
 
   Buffer control;
   Buffer ring;
@@ -476,6 +483,11 @@ public:
   }
   std::span<const uint32_t> cu_mask() const { return base.cu_mask(); }
 
+  std::expected<void, Error> set_priority(uint32_t priority) {
+    return base.set_priority(priority);
+  }
+  uint32_t priority() const { return base.priority(); }
+
   uint32_t gfx_version() const { return base.dev->gfx_version(); }
   uint32_t queue_id() const { return base.queue_id(); }
   size_t ring_dwords() const { return base.ring_dwords(); }
@@ -625,6 +637,11 @@ public:
     return base.set_cu_mask(mask);
   }
   std::span<const uint32_t> cu_mask() const { return base.cu_mask(); }
+
+  std::expected<void, Error> set_priority(uint32_t priority) {
+    return base.set_priority(priority);
+  }
+  uint32_t priority() const { return base.priority(); }
 
   uint32_t gfx_version() const { return base.dev->gfx_version(); }
   uint32_t queue_id() const { return base.queue_id(); }
@@ -825,6 +842,10 @@ public:
   uint32_t queue_id() const { return base.queue_id(); }
   size_t ring_dwords() const { return base.ring_dwords(); }
   uint32_t queue_depth() const { return base.queue_depth(); }
+  std::expected<void, Error> set_priority(uint32_t priority) {
+    return base.set_priority(priority);
+  }
+  uint32_t priority() const { return base.priority(); }
   explicit operator bool() const { return static_cast<bool>(base); }
 
 private:

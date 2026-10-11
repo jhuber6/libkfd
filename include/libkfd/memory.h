@@ -55,6 +55,9 @@ enum class MemFlags : uint32_t {
 
   // Extended (inter-device) coherence for multi-GPU XGMI topologies.
   EXT_COHERENT = /*KFD_IOC_ALLOC_MEM_FLAGS_EXT_COHERENT=*/0x1000000,
+
+  // Physically contiguous VRAM. The kernel ignores this on GTT.
+  CONTIGUOUS = /*KFD_IOC_ALLOC_MEM_FLAGS_CONTIGUOUS=*/(1u << 23),
 };
 
 inline constexpr MemFlags operator|(MemFlags a, MemFlags b) {
@@ -229,15 +232,47 @@ inline constexpr SVMFlags operator~(SVMFlags a) {
   return static_cast<SVMFlags>(~static_cast<uint32_t>(a));
 }
 
+// How a device may touch a VA range.
+enum class SVMAccess : uint8_t {
+  // Pages may migrate to the device on access.
+  Migrate,
+  // Remote access. Pages stay where they are.
+  InPlace,
+  // Access faults.
+  None,
+};
+
+// Where an SVM range lives.
+struct SVMLocation {
+  // Owning device, null for system memory.
+  Device *device = nullptr;
+  // The range contains system and device memory, device is null.
+  bool mixed = false;
+};
+
+// Attributes that agree across a VA range. flags are set on every page.
+// mixed flags are set on some pages and clear on others.
+struct SVMAttrs {
+  SVMFlags flags = SVMFlags::NONE;
+  SVMFlags mixed = SVMFlags::NONE;
+  uint8_t granularity = 0;
+  SVMLocation preferred;
+  SVMLocation prefetch;
+};
+
 // Prefetch or migrate a VA range to a device, or to system memory if null.
 std::expected<void, Error> svm_prefetch(Context &ctx, void *addr, size_t size,
                                         Device *dev = nullptr);
 
-// Grant one or more devices access to a VA range. When in_place is true
-// accesses are remote, otherwise pages may migrate on access.
-std::expected<void, Error> svm_set_access(Context &ctx, void *addr, size_t size,
-                                          std::span<Device *const> devices,
-                                          bool in_place = false);
+// Grant or deny device access to a VA range.
+std::expected<void, Error>
+svm_set_access(Context &ctx, void *addr, size_t size,
+               std::span<Device *const> devices,
+               SVMAccess access = SVMAccess::Migrate);
+
+// Access currently granted to one device.
+std::expected<SVMAccess, Error> svm_get_access(Context &ctx, void *addr,
+                                               size_t size, Device &dev);
 
 // Set the preferred migration target for a VA range.
 std::expected<void, Error> svm_set_preferred_loc(Context &ctx, void *addr,
@@ -251,6 +286,9 @@ std::expected<void, Error> svm_set_flags(Context &ctx, void *addr, size_t size,
 // Set the migration granularity for a VA range (log2 number of pages).
 std::expected<void, Error> svm_set_granularity(Context &ctx, void *addr,
                                                size_t size, uint8_t log2_pages);
+
+std::expected<SVMAttrs, Error> svm_get_attrs(Context &ctx, void *addr,
+                                             size_t size);
 
 } // namespace kfd
 

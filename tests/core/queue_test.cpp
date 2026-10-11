@@ -83,6 +83,13 @@ TEST_CASE("Queue - CU mask restricts and still executes", "[queue]") {
       REQUIRE(queue->cu_mask().size() == 1);
       CHECK(queue->cu_mask()[0] == mask);
 
+      CHECK(queue->priority() == kfd::QueueBase::DEFAULT_PRIORITY);
+      auto bad = queue->set_priority(16);
+      CHECK_FALSE(bad.has_value());
+      CHECK(bad.error().code == EINVAL);
+      REQUIRE_RESULT(queue->set_priority(15));
+      CHECK(queue->priority() == 15);
+
       auto sig = kfd::Signal::create(ctx);
       REQUIRE_RESULT(sig);
       REQUIRE_RESULT(queue->signal(*sig));

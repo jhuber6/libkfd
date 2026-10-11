@@ -53,6 +53,7 @@ using get_dmabuf_info_args = ::kfd_ioctl_get_dmabuf_info_args;
 using import_dmabuf_args = ::kfd_ioctl_import_dmabuf_args;
 using alloc_queue_gws_args = ::kfd_ioctl_alloc_queue_gws_args;
 using set_cu_mask_args = ::kfd_ioctl_set_cu_mask_args;
+using get_available_memory_args = ::kfd_ioctl_get_available_memory_args;
 
 inline constexpr unsigned long GET_VERSION = AMDKFD_IOC_GET_VERSION;
 inline constexpr unsigned long ACQUIRE_VM = AMDKFD_IOC_ACQUIRE_VM;
@@ -85,6 +86,7 @@ inline constexpr unsigned long GET_DMABUF_INFO = AMDKFD_IOC_GET_DMABUF_INFO;
 inline constexpr unsigned long IMPORT_DMABUF = AMDKFD_IOC_IMPORT_DMABUF;
 inline constexpr unsigned long ALLOC_QUEUE_GWS = AMDKFD_IOC_ALLOC_QUEUE_GWS;
 inline constexpr unsigned long SET_CU_MASK = AMDKFD_IOC_SET_CU_MASK;
+inline constexpr unsigned long AVAILABLE_MEMORY = AMDKFD_IOC_AVAILABLE_MEMORY;
 
 } // namespace kfd
 

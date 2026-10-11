@@ -38,6 +38,17 @@ TEST_CASE("Context - device initializes lazily on first access", "[context]") {
       REQUIRE_RESULT(dev);
       CHECK((*dev)->render_fd() >= 0);
       CHECK((*dev)->gpu_id() != 0);
+
+      CHECK((*dev)->drm_properties().timestamp_freq != 0);
+      auto stamp = (*dev)->timestamp();
+      REQUIRE_RESULT(stamp);
+      auto later = (*dev)->timestamp();
+      REQUIRE_RESULT(later);
+      CHECK(*later >= *stamp);
+
+      auto avail = (*dev)->available_memory();
+      REQUIRE_RESULT(avail);
+      CHECK(*avail % kfd::detail::page_size() == 0);
     }
   }
 }

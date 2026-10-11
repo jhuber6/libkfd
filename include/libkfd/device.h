@@ -57,6 +57,10 @@ public:
 
   const NodeProperties &properties() const { return info.props; }
   const DrmProperties &drm_properties() const { return drm_props; }
+
+  // GPU clock counter. drm_properties().timestamp_freq is its rate.
+  std::expected<uint64_t, Error> timestamp() const;
+
   uint32_t gpu_id() const { return info.props.gpu_id; }
   uint32_t gfx_version() const { return info.props.gfx_target_version; }
   int render_fd() const { return drm_fd; }
@@ -83,6 +87,9 @@ public:
   std::span<const IoLink> io_links() const {
     return {info.io_links.data(), info.io_links.size()};
   }
+
+  // Bytes still available to allocate on this node.
+  std::expected<uint64_t, Error> available_memory() const;
 
   // Checks if an ELF image can be loaded onto this device.
   bool loadable(std::span<const std::byte> image) const;

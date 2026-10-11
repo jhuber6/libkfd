@@ -33,6 +33,8 @@ static_assert(static_cast<uint32_t>(kfd::MemFlags::UNCACHED) ==
               static_cast<uint32_t>(KFD_IOC_ALLOC_MEM_FLAGS_UNCACHED));
 static_assert(static_cast<uint32_t>(kfd::MemFlags::EXT_COHERENT) ==
               static_cast<uint32_t>(KFD_IOC_ALLOC_MEM_FLAGS_EXT_COHERENT));
+static_assert(static_cast<uint32_t>(kfd::MemFlags::CONTIGUOUS) ==
+              static_cast<uint32_t>(KFD_IOC_ALLOC_MEM_FLAGS_CONTIGUOUS));
 
 static_assert(static_cast<uint32_t>(kfd::SVMFlags::HOST_ACCESS) ==
               KFD_IOCTL_SVM_FLAG_HOST_ACCESS);
@@ -377,21 +379,41 @@ DMABuffer &DMABuffer::operator=(DMABuffer &&other) {
 namespace {
 
 std::expected<void, kfd::Error>
-svm_set_attrs(int fd, void *addr, size_t size,
-              std::span<const ioctl::kfd::svm_attribute> attrs) {
+svm_ioctl(int fd, void *addr, size_t size, uint32_t op,
+          std::span<ioctl::kfd::svm_attribute> attrs) {
   constexpr size_t HDR = sizeof(ioctl::kfd::svm_args);
-  size_t extra = attrs.size() * sizeof(ioctl::kfd::svm_attribute);
+  constexpr size_t kMaxAttrs = 16;
+  if (attrs.size() > kMaxAttrs)
+    return kfd::unexpected(EINVAL, "SVM attribute count %zu exceeds %zu",
+                           attrs.size(), kMaxAttrs);
 
+  size_t extra = attrs.size() * sizeof(ioctl::kfd::svm_attribute);
   alignas(ioctl::kfd::svm_args) char
-      buf[HDR + 16 * sizeof(ioctl::kfd::svm_attribute)] = {};
+      buf[HDR + kMaxAttrs * sizeof(ioctl::kfd::svm_attribute)] = {};
   auto &args = *reinterpret_cast<ioctl::kfd::svm_args *>(buf);
   args.start_addr = reinterpret_cast<uintptr_t>(addr);
   args.size = size;
-  args.op = KFD_IOCTL_SVM_OP_SET_ATTR;
+  args.op = op;
   args.nattr = static_cast<uint32_t>(attrs.size());
   std::memcpy(args.attrs, attrs.data(), extra);
 
-  return ioctl::call<ioctl::kfd::SVM>(fd, args, extra);
+  KFD_CHECK(ioctl::call<ioctl::kfd::SVM>(fd, args, extra));
+  if (op == KFD_IOCTL_SVM_OP_GET_ATTR)
+    std::memcpy(attrs.data(), args.attrs, extra);
+  return {};
+}
+
+std::expected<SVMLocation, Error> svm_location(Context &ctx, uint32_t id) {
+  if (id == KFD_IOCTL_SVM_LOCATION_UNDEFINED)
+    return SVMLocation{.mixed = true};
+  if (id == KFD_IOCTL_SVM_LOCATION_SYSMEM)
+    return SVMLocation{};
+  for (Device &dev : ctx.devices()) {
+    if (dev.gpu_id() == id)
+      return SVMLocation{.device = &dev};
+  }
+  return kfd::unexpected(ENODEV,
+                         "SVM location gpu id %u is not in this context", id);
 }
 
 } // namespace
@@ -402,18 +424,23 @@ std::expected<void, Error> svm_prefetch(Context &ctx, void *addr, size_t size,
       .type = KFD_IOCTL_SVM_ATTR_PREFETCH_LOC,
       .value = dev ? dev->gpu_id() : 0,
   };
-  return svm_set_attrs(ctx.kfd_fd(), addr, size, {&attr, 1});
+  return svm_ioctl(ctx.kfd_fd(), addr, size, KFD_IOCTL_SVM_OP_SET_ATTR,
+                   {&attr, 1});
 }
 
 std::expected<void, Error> svm_set_access(Context &ctx, void *addr, size_t size,
                                           std::span<Device *const> devices,
-                                          bool in_place) {
-  uint32_t type =
-      in_place ? KFD_IOCTL_SVM_ATTR_ACCESS_IN_PLACE : KFD_IOCTL_SVM_ATTR_ACCESS;
+                                          SVMAccess access) {
+  uint32_t type = KFD_IOCTL_SVM_ATTR_ACCESS;
+  if (access == SVMAccess::InPlace)
+    type = KFD_IOCTL_SVM_ATTR_ACCESS_IN_PLACE;
+  else if (access == SVMAccess::None)
+    type = KFD_IOCTL_SVM_ATTR_NO_ACCESS;
   SmallVector<ioctl::kfd::svm_attribute, 8> attrs;
   for (auto *d : devices)
     KFD_CHECK(attrs.push_back({.type = type, .value = d->gpu_id()}));
-  return svm_set_attrs(ctx.kfd_fd(), addr, size, {attrs.data(), attrs.size()});
+  return svm_ioctl(ctx.kfd_fd(), addr, size, KFD_IOCTL_SVM_OP_SET_ATTR,
+                   {attrs.data(), attrs.size()});
 }
 
 std::expected<void, Error> svm_set_preferred_loc(Context &ctx, void *addr,
@@ -422,7 +449,8 @@ std::expected<void, Error> svm_set_preferred_loc(Context &ctx, void *addr,
       .type = KFD_IOCTL_SVM_ATTR_PREFERRED_LOC,
       .value = dev ? dev->gpu_id() : 0,
   };
-  return svm_set_attrs(ctx.kfd_fd(), addr, size, {&attr, 1});
+  return svm_ioctl(ctx.kfd_fd(), addr, size, KFD_IOCTL_SVM_OP_SET_ATTR,
+                   {&attr, 1});
 }
 
 std::expected<void, Error> svm_set_flags(Context &ctx, void *addr, size_t size,
@@ -432,7 +460,7 @@ std::expected<void, Error> svm_set_flags(Context &ctx, void *addr, size_t size,
       {.type = KFD_IOCTL_SVM_ATTR_SET_FLAGS, .value = raw},
       {.type = KFD_IOCTL_SVM_ATTR_CLR_FLAGS, .value = ~raw},
   };
-  return svm_set_attrs(ctx.kfd_fd(), addr, size, attrs);
+  return svm_ioctl(ctx.kfd_fd(), addr, size, KFD_IOCTL_SVM_OP_SET_ATTR, attrs);
 }
 
 std::expected<void, Error>
@@ -441,7 +469,51 @@ svm_set_granularity(Context &ctx, void *addr, size_t size, uint8_t log2_pages) {
       .type = KFD_IOCTL_SVM_ATTR_GRANULARITY,
       .value = log2_pages,
   };
-  return svm_set_attrs(ctx.kfd_fd(), addr, size, {&attr, 1});
+  return svm_ioctl(ctx.kfd_fd(), addr, size, KFD_IOCTL_SVM_OP_SET_ATTR,
+                   {&attr, 1});
+}
+
+std::expected<SVMAttrs, Error> svm_get_attrs(Context &ctx, void *addr,
+                                             size_t size) {
+  ioctl::kfd::svm_attribute attrs[] = {
+      {.type = KFD_IOCTL_SVM_ATTR_PREFERRED_LOC},
+      {.type = KFD_IOCTL_SVM_ATTR_PREFETCH_LOC},
+      {.type = KFD_IOCTL_SVM_ATTR_SET_FLAGS},
+      {.type = KFD_IOCTL_SVM_ATTR_CLR_FLAGS},
+      {.type = KFD_IOCTL_SVM_ATTR_GRANULARITY},
+  };
+  KFD_CHECK(
+      svm_ioctl(ctx.kfd_fd(), addr, size, KFD_IOCTL_SVM_OP_GET_ATTR, attrs));
+
+  SVMAttrs out;
+  out.preferred = KFD_TRY(svm_location(ctx, attrs[0].value));
+  out.prefetch = KFD_TRY(svm_location(ctx, attrs[1].value));
+  uint32_t on_all = attrs[2].value;
+  uint32_t on_any = ~attrs[3].value;
+  out.flags = static_cast<SVMFlags>(on_all);
+  out.mixed = static_cast<SVMFlags>(on_any & ~on_all);
+  out.granularity = static_cast<uint8_t>(attrs[4].value);
+  return out;
+}
+
+std::expected<SVMAccess, Error> svm_get_access(Context &ctx, void *addr,
+                                               size_t size, Device &dev) {
+  ioctl::kfd::svm_attribute attr{
+      .type = KFD_IOCTL_SVM_ATTR_ACCESS,
+      .value = dev.gpu_id(),
+  };
+  KFD_CHECK(svm_ioctl(ctx.kfd_fd(), addr, size, KFD_IOCTL_SVM_OP_GET_ATTR,
+                      {&attr, 1}));
+  switch (attr.type) {
+  case KFD_IOCTL_SVM_ATTR_ACCESS:
+    return SVMAccess::Migrate;
+  case KFD_IOCTL_SVM_ATTR_ACCESS_IN_PLACE:
+    return SVMAccess::InPlace;
+  case KFD_IOCTL_SVM_ATTR_NO_ACCESS:
+    return SVMAccess::None;
+  default:
+    return kfd::unexpected(EIO, "SVM access query returned type %u", attr.type);
+  }
 }
 
 } // namespace kfd

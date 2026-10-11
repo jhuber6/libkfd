@@ -354,6 +354,23 @@ bool Device::loadable(std::span<const std::byte> image) const {
                             sramecc);
 }
 
+std::expected<uint64_t, Error> Device::timestamp() const {
+  uint64_t counter = 0;
+  ioctl::drm::info_args req{
+      .return_pointer = reinterpret_cast<uintptr_t>(&counter),
+      .return_size = sizeof(counter),
+      .query = AMDGPU_INFO_TIMESTAMP,
+  };
+  KFD_CHECK(ioctl::call<ioctl::drm::AMDGPU_INFO>(drm_fd, req));
+  return counter;
+}
+
+std::expected<uint64_t, Error> Device::available_memory() const {
+  ioctl::kfd::get_available_memory_args args{.gpu_id = gpu_id()};
+  KFD_CHECK(ioctl::call<ioctl::kfd::AVAILABLE_MEMORY>(ctx->kfd_fd(), args));
+  return args.available;
+}
+
 std::expected<volatile uint64_t *, Error>
 Device::doorbell(uint64_t raw_offset) {
   detail::LockGuard guard(doorbell_mtx);
